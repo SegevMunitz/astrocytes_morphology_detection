@@ -1,240 +1,192 @@
 # Astrocyte Segmentation Pipeline
 
-A research-oriented image-analysis project for detecting and quantifying GFAP-positive astrocyte structures in multichannel microscopy images.
+A reproducible baseline for binary semantic segmentation of GFAP-positive astrocyte
+structures in multichannel OME-TIFF microscopy images.
 
-The first goal is to build a reproducible baseline pipeline that:
+The repository covers data validation, model-input construction, sparse human
+annotations, patch-based U-Net training, full-image prediction, grouped
+cross-validation, quality control, and preliminary field-level measurements.
 
-1. Reads multichannel OME-TIFF microscopy files.
-2. Extracts the GFAP and DAPI channels.
-3. Loads Cellpose nucleus-instance masks.
-4. Converts nucleus labels into model-ready inputs.
-5. Trains a semantic-segmentation model for GFAP-positive astrocyte structures.
-6. Produces full-image predictions, overlays, quality-control outputs, and quantitative measurements.
+> This is research infrastructure, not a scientifically validated astrocyte model.
+> Model quality must be established on real held-out experiments before biological use.
 
-The initial model is a binary semantic-segmentation model:
+## At a glance
 
-- `0`: background
-- `1`: GFAP-positive astrocyte structure
-
-The project should later support multiclass segmentation:
-
-- `0`: background
-- `1`: astrocyte soma
-- `2`: astrocyte processes
-
-## Scientific motivation
-
-Cellpose detects nuclei reliably in the current dataset, but it does not adequately segment complete astrocytes, especially thin GFAP-positive processes.
-
-This project therefore treats detected nuclei as spatial anchors and learns astrocyte segmentation from:
-
-- GFAP fluorescence
-- nucleus mask
-- nucleus-distance map
-
-The initial focus is segmentation of the full GFAP-positive astrocyte network rather than perfect assignment of every process to an individual astrocyte.
-
-## Initial model input and output
-
-### Input channels
-
-Each training sample should contain three channels:
-
-1. GFAP image
-2. Binary nucleus mask derived from Cellpose labels
-3. Nucleus-distance map
-
-Tensor shape:
+The model learns this mapping:
 
 ```text
-[C, H, W] = [3, H, W]
+normalized GFAP + nucleus mask + nucleus proximity
+                         |
+                         v
+       background vs GFAP-positive astrocyte structure
 ```
 
-### Output
-
-For the initial binary model:
-
-```text
-[H, W]
-```
-
-with class labels:
+Current output classes:
 
 ```text
 0 = background
 1 = GFAP-positive astrocyte structure
 ```
 
-The model itself should output logits of shape:
+The baseline predicts the complete GFAP-positive field. It does not yet separate
+individual astrocytes or distinguish soma from processes.
+
+## Two different types of Cellpose-related masks
+
+This distinction is central to the project:
+
+| Mask | Availability | Role |
+|---|---|---|
+| Cellpose nucleus instance mask | Required for every image used by the model | Creates two model-input channels |
+| Manually corrected astrocyte mask | Available for only a small labeled subset | Supervision target for training/evaluation |
+
+`cellpose_mask_path` in the manifest always refers to the **nucleus instance
+mask**. Positive integer values identify individual nuclei; zero is background.
+
+`annotation_path` refers to the **astrocyte segmentation target**. Imported
+instance-valued astrocyte masks are archived unchanged and converted to a binary
+training mask.
+
+Cellpose execution itself is currently external to this repository. Run nucleus
+detection first, preserve the original outputs, and enter their paths in the
+manifest.
+
+## How one training sample is constructed
+
+The manifest links the source image, nucleus labels, and human target:
 
 ```text
-[num_classes, H, W]
+manifest row
+  |
+  |-- path ------------------> OME-TIFF --> named GFAP channel --> normalization
+  |
+  |-- cellpose_mask_path ----> nucleus instances
+  |                                  |-- labels > 0 --> binary nucleus mask
+  |                                  `-- distance --> nucleus proximity map
+  |
+  `-- annotation_path -------> binary astrocyte target
+
+GFAP + nucleus mask + proximity --> [3, H, W] input
+astrocyte target -----------------> [H, W] target
 ```
 
-For binary segmentation with two explicit classes:
+The dataset then extracts identical spatial patches from the input and target.
+Each returned item contains:
+
+```python
+{
+    "image": torch.Tensor,        # [3, H, W], float32
+    "target": torch.Tensor,       # [H, W], long
+    "image_id": str,
+    "coordinates": PatchCoordinates,
+}
+```
+
+### Important implementation detail
+
+Training reads the OME-TIFF, nucleus labels, and annotation paths directly from
+the manifest. It constructs the three model channels lazily in the dataset.
+
+The files produced by `extract_channels.py`, `generate_nucleus_inputs.py`, and
+`create_patches.py` are useful for inspection, QC, and indexing, but they are not
+required inputs for training.
+
+## Repository map
 
 ```text
-[2, H, W]
+configs/                 YAML settings for data, training, and annotation workflow
+data/
+  raw/                   immutable source microscopy images
+  interim/               optional channel, nucleus, distance, and patch QC outputs
+  annotations/
+    originals/           archived human-exported instance masks
+    binary/              binary human training targets
+    qc/                  annotation alignment overlays
+  metadata/              manifest and split tables
+outputs/
+  checkpoints/           model checkpoints and histories
+  predictions/           standard model predictions
+  pseudo_labels/         automatic labels awaiting human correction
+  metrics/               evaluation tables
+  feature_tables/        preliminary morphology tables
+scripts/                 command-line entry points
+src/astroseg/             reusable package implementation
+tests/                    synthetic regression tests
+notebooks/                empty exploratory notebook templates
 ```
 
-## Recommended project structure
+Within `src/astroseg/`:
 
-```text
-astrocyte-segmentation/
-│
-├── README.md
-├── pyproject.toml
-├── .gitignore
-├── configs/
-│   ├── data.yaml
-│   ├── train_binary.yaml
-│   └── train_multiclass.yaml
-│
-├── data/
-│   ├── raw/
-│   ├── interim/
-│   │   ├── channels/
-│   │   ├── nucleus_masks/
-│   │   ├── nucleus_distance_maps/
-│   │   └── patches/
-│   ├── annotations/
-│   │   ├── binary/
-│   │   ├── multiclass/
-│   │   └── ignore_masks/
-│   ├── processed/
-│   │   ├── train/
-│   │   ├── val/
-│   │   └── test/
-│   └── metadata/
-│       ├── manifest.csv
-│       └── splits.csv
-│
-├── notebooks/
-│   ├── 01_inspect_tiff_channels.ipynb
-│   ├── 02_visualize_cellpose_masks.ipynb
-│   ├── 03_create_initial_annotations.ipynb
-│   └── 04_evaluate_baseline.ipynb
-│
-├── src/
-│   └── astroseg/
-│       ├── __init__.py
-│       ├── constants.py
-│       ├── io/
-│       │   ├── __init__.py
-│       │   ├── ome_tiff.py
-│       │   └── manifest.py
-│       ├── preprocessing/
-│       │   ├── __init__.py
-│       │   ├── normalize.py
-│       │   ├── nuclei.py
-│       │   ├── distance_maps.py
-│       │   └── patches.py
-│       ├── datasets/
-│       │   ├── __init__.py
-│       │   ├── astrocyte_dataset.py
-│       │   └── augmentations.py
-│       ├── models/
-│       │   ├── __init__.py
-│       │   ├── unet.py
-│       │   ├── segformer.py
-│       │   └── model_factory.py
-│       ├── training/
-│       │   ├── __init__.py
-│       │   ├── losses.py
-│       │   ├── metrics.py
-│       │   ├── trainer.py
-│       │   └── checkpoints.py
-│       ├── inference/
-│       │   ├── __init__.py
-│       │   ├── predict_patch.py
-│       │   ├── predict_full_image.py
-│       │   └── stitch.py
-│       ├── postprocessing/
-│       │   ├── __init__.py
-│       │   ├── clean_masks.py
-│       │   ├── skeleton.py
-│       │   └── nucleus_assignment.py
-│       ├── analysis/
-│       │   ├── __init__.py
-│       │   ├── morphology.py
-│       │   ├── image_features.py
-│       │   └── aggregate.py
-│       └── visualization/
-│           ├── __init__.py
-│           ├── overlays.py
-│           └── qc_plots.py
-│
-├── scripts/
-│   ├── build_manifest.py
-│   ├── extract_channels.py
-│   ├── generate_nucleus_inputs.py
-│   ├── create_patches.py
-│   ├── train.py
-│   ├── evaluate.py
-│   ├── predict.py
-│   └── extract_features.py
-│
-├── tests/
-│   ├── test_ome_tiff.py
-│   ├── test_patches.py
-│   ├── test_dataset.py
-│   └── test_metrics.py
-│
-└── outputs/
-    ├── checkpoints/
-    ├── predictions/
-    ├── overlays/
-    ├── metrics/
-    └── feature_tables/
+| Package | Responsibility |
+|---|---|
+| `io` | OME-TIFF and manifest loading |
+| `preprocessing` | normalization, nucleus conversion, proximity maps, patches |
+| `annotations` | non-destructive imports, pseudo-label storage, uncertainty selection |
+| `datasets` | manifest filtering and PyTorch sample construction |
+| `models` | compact U-Net and model factory |
+| `training` | losses, metrics, checkpoints, trainer, grouped folds |
+| `inference` | patch prediction and full-image stitching |
+| `visualization` | previews, overlays, and QC montages |
+| `postprocessing` | preliminary cleanup, skeleton, and nucleus assignment |
+| `analysis` | preliminary image and component measurements |
+
+## Manifest
+
+Every microscopy image has one row in `data/metadata/manifest.csv`.
+
+Required project columns:
+
+| Column | Meaning |
+|---|---|
+| `image_id` | Unique stable image identifier |
+| `experiment_id` | Experiment identifier, if known |
+| `timepoint` | Experimental time point |
+| `treatment` | Treatment label |
+| `magnification` | Acquisition magnification |
+| `path` | OME-TIFF path |
+| `gfap_channel` | Exact OME channel name for GFAP |
+| `dapi_channel` | Exact OME channel name for DAPI |
+| `cellpose_mask_path` | Nucleus instance-label mask |
+| `annotation_path` | Active astrocyte target or pseudo mask |
+| `annotation_status` | Annotation lifecycle state |
+| `annotation_source` | Human or model provenance |
+| `annotator` | Human annotator identifier |
+| `review_status` | Free-text review state |
+| `split` | `train`, `val`, `test`, or empty |
+
+Additional metadata columns are allowed. For example, add `well_id` to group
+cross-validation at well level.
+
+The code does not infer GFAP/DAPI identities or experimental groups from filenames.
+Channel names and experimental metadata must be entered explicitly.
+
+## Annotation lifecycle
+
+Allowed `annotation_status` values:
+
+| Status | Meaning | Used for training by default? |
+|---|---|---|
+| `none` | No astrocyte annotation | No |
+| `seed` | Initial manually corrected annotation | Yes |
+| `pseudo` | Automatic model prediction awaiting correction | No |
+| `corrected` | Human-corrected seed or pseudo label | Yes |
+| `reviewed` | Human-reviewed annotation ready for use | Yes |
+
+The default training policy is intentionally conservative:
+
+```yaml
+train_annotation_statuses:
+  - seed
+  - corrected
+  - reviewed
 ```
 
-## Pipeline overview
+Pseudo labels cannot enter training accidentally. They must be corrected or
+explicitly enabled in configuration.
 
-```text
-OME-TIFF
-   ↓
-Read image and metadata
-   ↓
-Identify GFAP and DAPI channels
-   ↓
-Load Cellpose nucleus labels
-   ↓
-Create binary nucleus mask
-   ↓
-Create nucleus-distance map
-   ↓
-Normalize model inputs
-   ↓
-Split into overlapping patches
-   ↓
-Train segmentation model
-   ↓
-Predict full-resolution masks
-   ↓
-Stitch overlapping predictions
-   ↓
-Post-process and create overlays
-   ↓
-Extract quantitative features
-```
+### Human and automatic data stay separate
 
-## Data organization
-
-Raw data should remain unchanged.
-
-Recommended convention:
-
-```text
-data/raw/<experiment_id>/<original_file_name>.tif
-```
-
-Cellpose masks should be stored separately:
-
-```text
-data/interim/nucleus_masks/<image_id>_nuclei.tif
-```
-
-Annotations should be stored using the same `image_id`:
+Human annotation artifacts:
 
 ```text
 data/annotations/originals/<image_id>/<status>_<content_hash>.<ext>
@@ -242,7 +194,7 @@ data/annotations/binary/<image_id>_<status>_binary.tiff
 data/annotations/qc/<image_id>_<status>_annotation_overlay.png
 ```
 
-Automatic predictions and pseudo labels are stored separately:
+Automatic pseudo-label artifacts:
 
 ```text
 outputs/pseudo_labels/probabilities/<image_id>.npy
@@ -250,393 +202,31 @@ outputs/pseudo_labels/masks/<image_id>.tiff
 outputs/pseudo_labels/overlays/<image_id>.png
 ```
 
-Never overwrite raw microscopy images, original Cellpose files, or imported
-annotation exports. Imported masks are archived by content hash before a binary
-training target is created.
-
-## Manifest
-
-Every image should have one row in `data/metadata/manifest.csv`.
-
-Recommended fields:
-
-```text
-image_id
-experiment_id
-culture_date
-staining_date
-plate
-well
-field
-timepoint
-treatment
-magnification
-biological_replicate
-technical_replicate
-path
-gfap_channel
-dapi_channel
-has_brightfield
-cellpose_mask_path
-annotation_path
-annotation_status
-annotation_source
-annotator
-review_status
-split
-```
-
-`annotation_status` is required and must be one of:
-
-- `none`: no annotation is available
-- `seed`: manually corrected seed annotation
-- `pseudo`: automatic model prediction awaiting correction
-- `corrected`: a human corrected a seed or pseudo label
-- `reviewed`: a human-reviewed annotation ready for use
-
-By default, datasets train only on `seed`, `corrected`, and `reviewed` rows.
-Pseudo labels never enter training unless the configuration explicitly opts in.
-
-The code should not infer experimental groups from filenames during training. Filename parsing may be used to build the initial manifest, but all downstream code should rely on the manifest.
-
-## Train, validation, and test splitting
-
-Do not split random patches from the same image across train and test.
-
-Splits must be defined before patch extraction and should be grouped by the highest available biological level, such as:
-
-- biological replicate
-- experiment
-- plate
-- well
-
-The test set should contain images from wells or experiments not seen during training.
-
-Store the split assignments in:
-
-```text
-data/metadata/splits.csv
-```
-
-For very small labeled datasets, grouped cross-validation can instead be enabled
-in the training configuration. Fold assignment happens at the manifest image or
-well level before patches are generated, so patches from one image cannot appear
-in different folds. Use `group_column: image_id` by default, or add an explicit
-non-empty `well_id` column and use `group_column: well_id`.
-
-Each cross-validation run also saves `cross_validation_assignments.csv` beside its
-checkpoints, recording the image/group, fold, and effective split used by that run.
-Evaluation reconstructs complete probability maps before calculating metrics, so
-pixels in overlapping patches are counted exactly once.
-
-## Seed annotation and correction workflow
-
-The supported iterative workflow is:
-
-```text
-manually corrected Cellpose seed masks
-    -> initial binary U-Net training
-    -> full-image predictions on annotation_status=none images
-    -> uncertainty-ranked patch selection
-    -> manual correction and review
-    -> import corrected masks
-    -> retraining on seed + corrected + reviewed masks
-```
-
-An import pair table minimally contains:
-
-```csv
-image_id,mask_path,annotation_status,annotation_source,annotator,review_status
-image_001,exports/image_001_instances.tiff,seed,cellpose_manual_correction,AB,pending
-```
-
-Image identity, exact dimensions, numeric non-negative labels, and the named GFAP
-channel are validated. The generated overlay must still be inspected because
-dimensions alone cannot prove biological registration when source TIFF metadata
-is incomplete. Instance IDs are converted to a binary target (`0` background,
-`1` GFAP-positive structure) while the instance-valued source is retained.
-
-## Preprocessing
-
-### GFAP normalization
-
-Use percentile normalization for model input only.
-
-Example:
-
-```text
-lower percentile = 1.0
-upper percentile = 99.8
-```
-
-Do not use independently normalized images for biological intensity comparisons.
-
-Maintain:
-
-1. normalized images for model training
-2. minimally processed raw-intensity images for quantitative analysis
-
-### Nucleus mask
-
-Cellpose nucleus labels are expected to be instance-label images:
-
-```text
-0 = background
-1, 2, 3, ... = individual nuclei
-```
-
-Convert them into a binary mask:
-
-```text
-0 = no nucleus
-1 = nucleus
-```
-
-### Nucleus-distance map
-
-Create a map that is high near nuclei and decreases with distance.
-
-One suitable definition is:
-
-```text
-proximity = 1 - min(distance, max_distance) / max_distance
-```
-
-The output should be a float image in `[0, 1]`.
-
-## Patch extraction
-
-Initial recommendation:
-
-```text
-patch size = 512 × 512
-overlap = 64 pixels
-```
-
-Every patch must retain:
-
-- `image_id`
-- top-left `x`
-- top-left `y`
-- width
-- height
-- split
-
-Patch extraction must be deterministic and testable.
-
-Avoid saving patches unless required. Prefer lazy patch extraction from full images when practical.
-
-## Baseline model
-
-The first baseline should be a small 2D U-Net implemented in PyTorch.
-
-Requirements:
-
-- configurable number of input channels
-- configurable number of output classes
-- skip connections
-- no fully connected classification head
-- output spatial resolution equal to input resolution
-
-Initial configuration:
-
-```yaml
-model:
-  architecture: unet
-  input_channels: 3
-  num_classes: 2
-  base_channels: 32
-```
-
-The code should support adding SegFormer later through a model factory.
-
-## Loss
-
-Initial loss:
-
-```text
-total_loss = cross_entropy + dice_loss
-```
-
-Do not add advanced losses until the basic pipeline is verified.
-
-Later candidates:
-
-- focal loss
-- class-weighted cross-entropy
-- clDice for thin-process topology
-
-## Metrics
-
-Initial metrics:
-
-- Dice score
-- Intersection over Union
-- precision
-- recall
-
-Later topology-aware metrics:
-
-- clDice
-- skeleton-length error
-- branch-point error
-- endpoint error
-
-Metrics should be reported:
-
-- globally
-- per image
-- per experimental timepoint
-- per test experiment or well
-
-## Training configuration
-
-Example:
-
-```yaml
-seed: 42
-
-data:
-  manifest_path: data/metadata/manifest.csv
-  splits_path: data/metadata/splits.csv
-  patch_size: 512
-  overlap: 64
-  num_workers: 4
-  train_annotation_statuses:
-    - seed
-    - corrected
-    - reviewed
-
-model:
-  architecture: unet
-  input_channels: 3
-  num_classes: 2
-  base_channels: 32
-
-training:
-  epochs: 100
-  batch_size: 8
-  learning_rate: 0.0003
-  weight_decay: 0.0001
-  early_stopping_patience: 15
-
-loss:
-  cross_entropy_weight: 1.0
-  dice_weight: 1.0
-
-cross_validation:
-  enabled: false
-  n_splits: 5
-  validation_fold: 0
-  group_column: image_id
-  fold_column: fold
-
-output:
-  directory: outputs/checkpoints/binary_baseline
-```
-
-## Inference
-
-Full-image inference should:
-
-1. generate overlapping patches
-2. run the model on each patch
-3. convert logits to probabilities
-4. combine overlapping probability maps
-5. use weighted averaging in overlap regions
-6. apply `argmax` to create the final mask
-7. save:
-   - probability map
-   - class mask
-   - overlay image
-   - metadata JSON
-
-Avoid stitching hard class labels directly.
-
-## Quality control
-
-For each image, create a QC montage containing:
-
-- raw GFAP
-- DAPI
-- Cellpose nucleus labels
-- binary nucleus mask
-- nucleus-distance map
-- annotation, when available
-- model prediction
-- overlay
-
-The first development milestone is:
-
-> Given one OME-TIFF and its Cellpose mask, generate a correctly aligned three-channel model input and a QC montage.
-
-## Feature extraction
-
-After segmentation is stable, extract image-level features such as:
-
-- GFAP-positive area
-- GFAP-positive fraction
-- total GFAP intensity
-- mean GFAP intensity
-- number of nuclei
-- GFAP area per nucleus
-- skeleton length
-- branch points
-- endpoints
-- connected components
-
-Do not treat individual cells from the same well as independent biological replicates.
-
-Features should eventually be summarized at:
-
-- field level
-- well level
-- biological-replicate level
+Original Cellpose files and imported annotation exports are never modified.
 
 ## Installation
 
-Recommended Python version:
+Python 3.11 is recommended.
 
-```text
-Python 3.11
+```bash
+python -m venv .venv
 ```
 
-Create and activate a Python 3.11 environment, then install the package and
-development dependencies in editable mode:
+Activate the environment, then install the package and test dependencies:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-Core dependencies:
+Run the test suite:
 
-```text
-numpy
-pandas
-scipy
-scikit-image
-tifffile
-ome-types
-matplotlib
-pyyaml
-pydantic
-torch
-torchvision
-albumentations
-tqdm
+```bash
 pytest
 ```
 
-Optional later dependencies:
+## End-to-end workflow
 
-```text
-segmentation-models-pytorch
-transformers
-monai
-cellpose
-```
-
-## Expected command-line workflow
+### 1. Build the initial manifest
 
 ```bash
 python scripts/build_manifest.py \
@@ -644,11 +234,40 @@ python scripts/build_manifest.py \
   --output data/metadata/manifest.csv
 ```
 
+The builder discovers `.tif` and `.tiff` files and assigns stable image IDs. It
+does not guess experimental metadata or channel identities. New rows start with
+`annotation_status=none`.
+
+After creation, fill at least:
+
+- `gfap_channel`
+- `dapi_channel`
+- experimental metadata needed for splitting/grouping
+
+### 2. Run Cellpose nucleus detection externally
+
+Run Cellpose on every image that will be used for training or inference. Preserve
+the instance-valued nucleus outputs and populate `cellpose_mask_path` for each row.
+
+Expected nucleus mask contract:
+
+```text
+2D array aligned with the microscopy image
+0 = background
+1, 2, 3, ... = nucleus instances
+```
+
+### 3. Optional preprocessing and QC
+
+Extract named channels:
+
 ```bash
 python scripts/extract_channels.py \
   --manifest data/metadata/manifest.csv \
   --output-dir data/interim/channels
 ```
+
+Generate binary nucleus masks, proximity maps, previews, and montages:
 
 ```bash
 python scripts/generate_nucleus_inputs.py \
@@ -656,8 +275,27 @@ python scripts/generate_nucleus_inputs.py \
   --output-dir data/interim
 ```
 
-Import initial manually corrected Cellpose astrocyte masks. The input exports are
-copied unchanged before binary masks are created:
+Create a coordinate-only patch index without copying image arrays:
+
+```bash
+python scripts/create_patches.py \
+  --manifest data/metadata/manifest.csv \
+  --output data/interim/patches/patch_index.csv \
+  --patch-size 512 \
+  --overlap 64
+```
+
+### 4. Import seed astrocyte annotations
+
+Create a pair table linking image IDs to manually corrected exports:
+
+```csv
+image_id,mask_path,annotation_status,annotation_source,annotator,review_status
+image_001,exports/image_001_instances.tiff,seed,cellpose_manual_correction,AB,pending
+image_002,exports/image_002_instances.tiff,seed,cellpose_manual_correction,AB,pending
+```
+
+Import the pairs:
 
 ```bash
 python scripts/import_existing_annotations.py \
@@ -669,13 +307,79 @@ python scripts/import_existing_annotations.py \
   --annotator AB
 ```
 
-Point `data.manifest_path` in the training configuration at the seed manifest,
-then train normally or choose a grouped validation fold:
+The importer verifies exact dimensions and integer-valued non-negative labels,
+archives the original instance mask, creates a binary target, and saves a GFAP
+overlay. Always inspect the overlay: equal dimensions alone cannot prove biological
+registration when source metadata is incomplete.
+
+### 5. Configure training
+
+Edit `configs/train_binary.yaml` and point `data.manifest_path` to the active
+manifest, for example:
+
+```yaml
+data:
+  manifest_path: data/metadata/manifest_seed.csv
+```
+
+Other important defaults:
+
+```yaml
+data:
+  patch_size: 512
+  overlap: 64
+  max_nucleus_distance: 64.0
+
+model:
+  architecture: unet
+  input_channels: 3
+  num_classes: 2
+  base_channels: 32
+```
+
+### 6. Train the baseline
 
 ```bash
-python scripts/train.py \
-  --config configs/train_binary.yaml
+python scripts/train.py --config configs/train_binary.yaml
 ```
+
+The trainer uses AdamW, cross-entropy plus Dice loss, early stopping, and saves:
+
+```text
+<output.directory>/best.pt
+<output.directory>/last.pt
+<output.directory>/history.csv
+```
+
+Each checkpoint contains model state, optimizer state, epoch, validation metric,
+and the complete configuration.
+
+For a quick CPU plumbing check:
+
+```bash
+python scripts/train.py --smoke-test --smoke-steps 25
+```
+
+### 7. Use grouped cross-validation for the small labeled dataset
+
+Enable cross-validation in the training configuration:
+
+```yaml
+cross_validation:
+  enabled: true
+  n_splits: 5
+  validation_fold: 0
+  group_column: image_id
+  fold_column: fold
+```
+
+For well-level grouping, add a non-empty `well_id` manifest column and set:
+
+```yaml
+group_column: well_id
+```
+
+Run a specific fold:
 
 ```bash
 python scripts/train.py \
@@ -683,8 +387,48 @@ python scripts/train.py \
   --fold 0
 ```
 
-Generate automatic labels only for rows in state `none`. This writes a new
-manifest and keeps automatic files under `outputs/`:
+Fold assignment occurs before patch generation. All patches from one image—and all
+images from one well when well grouping is used—remain in the same fold. The run
+saves `cross_validation_assignments.csv` beside its checkpoints.
+
+### 8. Evaluate
+
+```bash
+python scripts/evaluate.py \
+  --config configs/train_binary.yaml \
+  --checkpoint outputs/checkpoints/binary_baseline/best.pt \
+  --split val \
+  --output outputs/metrics/validation.csv
+```
+
+Evaluation reconstructs each full image before calculating metrics. Overlapping
+patch pixels are therefore counted once. The output includes per-image and
+image-macro aggregate Dice, IoU, precision, and recall values.
+
+### 9. Predict full images
+
+```bash
+python scripts/predict.py \
+  --config configs/train_binary.yaml \
+  --checkpoint outputs/checkpoints/binary_baseline/best.pt \
+  --split test \
+  --output-dir outputs/predictions
+```
+
+For each image, inference:
+
+1. Generates overlapping patches.
+2. Applies the model and softmax.
+3. Averages probabilities in overlap regions.
+4. Restores the original image dimensions.
+5. Saves probabilities, a TIFF class mask, and a GFAP overlay.
+
+Hard labels are never stitched directly.
+
+### 10. Generate pseudo labels for unlabeled images
+
+The active manifest in the configuration should contain rows with
+`annotation_status=none`.
 
 ```bash
 python scripts/generate_pseudo_labels.py \
@@ -694,7 +438,10 @@ python scripts/generate_pseudo_labels.py \
   --output-manifest data/metadata/manifest_with_pseudo.csv
 ```
 
-Rank uncertain pseudo-labeled patches for manual correction:
+The source manifest is not silently replaced. Matching rows in the new manifest
+receive `annotation_status=pseudo` and model provenance.
+
+### 11. Select uncertain patches for correction
 
 ```bash
 python scripts/select_unlabeled_patches.py \
@@ -707,49 +454,161 @@ python scripts/select_unlabeled_patches.py \
   --max-patches-per-image 5
 ```
 
-After correction, import the new masks with `--status corrected` and a new output
-manifest, update `data.manifest_path`, and rerun training. `--overwrite` permits a
-new lifecycle state to replace the active binary target for an image; archived
-content-addressed originals are never overwritten.
+Patches are ranked by mean normalized predictive entropy. This is a simple active
+learning heuristic: high uncertainty indicates useful candidates for human review,
+not necessarily biologically important regions.
+
+### 12. Import corrections and retrain
+
+Export corrected masks from the annotation tool and build another pair table. Then
+import them against the pseudo manifest:
 
 ```bash
-python scripts/evaluate.py \
-  --config configs/train_binary.yaml \
-  --checkpoint outputs/checkpoints/binary_baseline/best.pt
+python scripts/import_existing_annotations.py \
+  --manifest data/metadata/manifest_with_pseudo.csv \
+  --pairs-csv data/metadata/corrected_annotation_pairs.csv \
+  --output-dir data/annotations \
+  --output-manifest data/metadata/manifest_corrected.csv \
+  --status corrected \
+  --annotator AB \
+  --overwrite
 ```
 
+`--overwrite` permits the active annotation lifecycle entry to advance. Archived
+content-addressed originals are still never overwritten.
+
+Point `data.manifest_path` to `manifest_corrected.csv` and repeat training.
+
+### 13. Extract preliminary field-level features
+
 ```bash
-python scripts/predict.py \
-  --config configs/train_binary.yaml \
-  --checkpoint outputs/checkpoints/binary_baseline/best.pt \
-  --split test
+python scripts/extract_features.py \
+  --mask-dir outputs/predictions/masks \
+  --output outputs/feature_tables/test_features.csv
 ```
+
+Current measurements include positive pixels, positive area fraction, connected
+components, skeleton pixels, branch pixels, and endpoints. They are preliminary
+pixel-level field summaries, not validated single-cell morphology measurements.
+
+## Model and training details
+
+### Baseline model
+
+The implemented model is a compact 2D U-Net with three encoder levels, a
+bottleneck, skip-connected decoder levels, and a final `1x1` convolution. It
+returns per-pixel logits:
+
+```text
+[B, num_classes, H, W]
+```
+
+Odd image dimensions are handled by interpolation at skip connections. There is
+no fully connected classification head.
+
+### Loss
+
+Training combines:
+
+- categorical cross-entropy for per-pixel classification;
+- soft multiclass Dice loss for region overlap.
+
+Background is excluded from Dice by default.
+
+### Metrics
+
+The evaluation API reports per-class and foreground-macro:
+
+- Dice;
+- intersection over union;
+- precision;
+- recall.
+
+Empty-class cases follow explicit finite rules and never return NaN.
+
+## Command reference
+
+| Script | Purpose |
+|---|---|
+| `build_manifest.py` | Discover TIFFs and create a conservative manifest template |
+| `extract_channels.py` | Save explicit GFAP/DAPI arrays and previews |
+| `generate_nucleus_inputs.py` | Validate Cellpose nuclei and generate masks, proximity, QC |
+| `create_patches.py` | Create a coordinate-only patch index |
+| `import_existing_annotations.py` | Archive, validate, binarize, and record human masks |
+| `train.py` | Train U-Net, run grouped folds, or execute the smoke test |
+| `evaluate.py` | Reconstruct full annotated images and save metrics |
+| `predict.py` | Run full-image inference for a manifest split |
+| `generate_pseudo_labels.py` | Predict `none` rows and create a pseudo-label manifest |
+| `select_unlabeled_patches.py` | Rank patches by predictive entropy |
+| `extract_features.py` | Extract preliminary mask and skeleton features |
+
+Every script provides detailed arguments through:
+
+```bash
+python scripts/<script_name>.py --help
+```
+
+## Recommended code-reading order
+
+To understand the implementation without reading every file, follow one sample:
+
+1. `configs/train_binary.yaml` — experiment settings.
+2. `scripts/train.py` — training entry point.
+3. `src/astroseg/io/manifest.py` — manifest contract.
+4. `src/astroseg/datasets/astrocyte_dataset.py` — input/target construction.
+5. `src/astroseg/preprocessing/` — channel transformations and patches.
+6. `src/astroseg/models/unet.py` — model forward pass.
+7. `src/astroseg/training/trainer.py` — optimization and checkpoints.
+8. `src/astroseg/inference/predict_full_image.py` — full-resolution prediction.
+9. `src/astroseg/annotations/` — sparse annotation lifecycle.
+
+All functions and classes include concise multi-line docstrings describing their
+role, data contract, and important constraints.
+
+## Tests
+
+Tests use synthetic images and temporary directories; no research data is needed.
+
+Coverage includes:
+
+- OME-TIFF axes, dtype, metadata, and channel selection;
+- normalization and nucleus validation;
+- proximity-map constraints;
+- patch coverage and exact stitching;
+- dataset filtering, shapes, and target class ranges;
+- odd-sized U-Net output;
+- Dice, IoU, precision, recall, and empty classes;
+- full-image metric reconstruction;
+- non-destructive annotation import;
+- pseudo-label storage and uncertainty selection;
+- image/well grouped cross-validation and fold balancing.
+
+Run:
+
+```bash
+pytest
+```
+
+## Current limitations
+
+- Cellpose is not executed by this repository; nucleus masks are external inputs.
+- The scientifically supported task is binary segmentation only.
+- Multiclass configuration exists for future work, but multiclass annotations are
+  not yet available.
+- SegFormer is an explicit `NotImplementedError` placeholder.
+- Notebooks are empty exploratory templates.
+- Prediction is patch-by-patch rather than batched for throughput.
+- Checkpoints contain optimizer state, but no resume-training CLI is implemented.
+- Skeleton, branch, endpoint, and nucleus-assignment outputs are preliminary.
+- No model in this repository should be considered biologically validated yet.
 
 ## Development principles
 
-- Keep raw data immutable.
-- Keep notebooks exploratory; production logic belongs in `src/astroseg`.
-- Add type hints and docstrings to public functions.
-- Use deterministic random seeds.
-- Add tests for shape, dtype, alignment, and patch stitching.
-- Fail clearly when expected channels or masks are missing.
-- Do not silently guess channel identities.
-- Store training configuration with every checkpoint.
-- Save enough metadata to reproduce every result.
-- Prefer a simple working baseline over a complex unverified architecture.
-
-## Initial milestone checklist
-
-- [ ] Project installs successfully with `pip install -e ".[dev]"`
-- [ ] OME-TIFF loader reads image and channel metadata
-- [ ] Manifest builder catalogs raw files
-- [ ] Cellpose labels align with microscopy images
-- [ ] Binary nucleus masks are generated
-- [ ] Nucleus-distance maps are generated
-- [ ] QC montage is generated for one full image
-- [ ] Patch extraction and stitching pass tests
-- [ ] PyTorch dataset returns valid tensors
-- [ ] Small U-Net trains on a tiny sample
-- [ ] Overfit test succeeds on one or two patches
-- [ ] Full-image prediction and overlay are saved
-- [ ] Dice and IoU are reported
+- Keep raw microscopy and original annotation exports immutable.
+- Never guess missing channel identities.
+- Keep image I/O separate from preprocessing and model code.
+- Define image/well splits before patch generation.
+- Keep automatic predictions separate from human-reviewed annotations.
+- Store complete configuration and fold assignments with training outputs.
+- Fail clearly on invalid dimensions, labels, classes, or missing files.
+- Prefer a small reproducible baseline over an unverified complex model.
