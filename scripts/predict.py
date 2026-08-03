@@ -86,9 +86,9 @@ def predict_split(
         directory.mkdir(parents=True, exist_ok=True)
     for _, row in rows.iterrows():
         if not row["cellpose_mask_path"].strip() or not row["gfap_channel"].strip():
-            raise ValueError(f"Explicit Cellpose path and GFAP channel are required for {row['image_id']!r}")
+            raise ValueError(f"Explicit nucleus-mask path and GFAP channel are required for {row['image_id']!r}")
         microscopy = load_ome_tiff(_resolve_path(row["path"], manifest_path, "Image"))
-        labels = _load_labels(_resolve_path(row["cellpose_mask_path"], manifest_path, "Cellpose mask"))
+        labels = _load_labels(_resolve_path(row["cellpose_mask_path"], manifest_path, "Nucleus mask"))
         inputs = prepare_model_inputs(
             microscopy,
             row["gfap_channel"],

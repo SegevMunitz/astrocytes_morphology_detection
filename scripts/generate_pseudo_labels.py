@@ -106,11 +106,11 @@ def generate_pseudo_labels(
         row = manifest.loc[index]
         if not str(row["cellpose_mask_path"]).strip() or not str(row["gfap_channel"]).strip():
             raise ValueError(
-                f"Explicit Cellpose path and GFAP channel are required for {row['image_id']!r}"
+                f"Explicit nucleus-mask path and GFAP channel are required for {row['image_id']!r}"
             )
         microscopy = load_ome_tiff(_resolve_path(str(row["path"]), manifest_path, "Image"))
         labels = _load_labels(
-            _resolve_path(str(row["cellpose_mask_path"]), manifest_path, "Cellpose mask")
+            _resolve_path(str(row["cellpose_mask_path"]), manifest_path, "Nucleus mask")
         )
         inputs = prepare_model_inputs(
             microscopy,

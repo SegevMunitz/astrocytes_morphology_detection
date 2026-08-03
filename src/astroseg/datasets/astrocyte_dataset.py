@@ -76,8 +76,8 @@ def prepare_model_inputs(
 ) -> np.ndarray:
     """Build the three channel-first inputs consumed by the baseline model.
 
-    GFAP is percentile-normalized, Cellpose nucleus instances become a binary
-    mask, and Euclidean distance supplies a bounded proximity plane.
+    GFAP is percentile-normalized, nucleus instances become a binary mask, and
+    Euclidean distance supplies a bounded proximity plane.
     """
     gfap = get_channel(microscopy_image, gfap_channel)
     validate_nucleus_labels(nucleus_labels, gfap.shape)
@@ -151,7 +151,7 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
                 if not row[field].strip():
                     raise ValueError(f"{field} is empty for image {row['image_id']!r}")
             image_path = _resolve_existing_path(row["path"], base_directory, "image")
-            nucleus_path = _resolve_existing_path(row["cellpose_mask_path"], base_directory, "Cellpose mask")
+            nucleus_path = _resolve_existing_path(row["cellpose_mask_path"], base_directory, "nucleus mask")
             annotation_path = _resolve_existing_path(row["annotation_path"], base_directory, "annotation")
             microscopy = load_ome_tiff(image_path)
             image_shape = microscopy.image.shape[-2:]

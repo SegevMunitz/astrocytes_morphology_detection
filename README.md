@@ -4,7 +4,7 @@ A research-oriented image-analysis project for segmenting GFAP-positive astrocyt
 structures in multichannel microscopy TIFF and OME-TIFF images.
 
 The repository implements the complete baseline path from microscopy files and
-Cellpose nucleus labels to patch-based U-Net training, full-resolution prediction,
+automatically detected nucleus labels to patch-based U-Net training, full-resolution prediction,
 quality-control images, grouped cross-validation, and preliminary measurements.
 It also supports a small seed dataset of manually corrected astrocyte masks and an
 iterative annotation workflow for expanding that dataset safely.
@@ -22,8 +22,8 @@ processes.
 
 ## Scientific motivation
 
-Cellpose can provide useful nucleus detections for this dataset, but a nucleus
-mask is not a complete astrocyte mask. Thin GFAP-positive processes can extend far
+The DAPI channel provides a strong signal for nucleus detection, but a nucleus mask
+is not a complete astrocyte mask. Thin GFAP-positive processes can extend far
 from the nucleus, overlap with neighboring structures, and are often not captured
 well by an instance-segmentation method focused on compact objects.
 
@@ -31,7 +31,7 @@ This project therefore uses nuclei as spatial context rather than as the answer.
 For every pixel, the model combines:
 
 1. GFAP fluorescence, which contains the structure to segment.
-2. A binary nucleus mask, derived from Cellpose instance labels.
+2. A binary nucleus mask, derived from internal or externally supplied instance labels.
 3. A smooth nucleus-proximity map, which tells the model how close the pixel is
    to the nearest detected nucleus.
 
@@ -45,14 +45,16 @@ implemented and scientifically intended baseline is binary.
 ## The project in one diagram
 
 ```text
-OME-TIFF image
+microscopy TIFF
     |
-    |-- named GFAP channel ----------------> percentile normalization ------+
+    |-- automatic GFAP channel -----------> percentile normalization ------+
     |                                                                      |
     |                                                                      v
-Cellpose nucleus instance mask --> binary nucleus mask ------------> [3, H, W]
-    |                                                                      |
-    `-----------------------------> nucleus-proximity map ------------------+
+    |-- automatic DAPI channel --> classical Otsu + watershed               |
+    |                                      (not a neural network)            |
+    |                                                   --> nucleus instances|
+                                                  |-- binary nucleus mask ->|
+                                                  `-- proximity map --------+
                                                                            |
                                                                            v
 Human astrocyte mask --> validated binary target [H, W] ------------> 2D U-Net
@@ -76,10 +78,10 @@ There are two different segmentation-like inputs in this project:
 
 | File | Manifest column | What it contains | How it is used |
 |---|---|---|---|
-| Cellpose nucleus mask | `cellpose_mask_path` | `0` for background and positive instance IDs for nuclei | Converted into two model-input channels |
+| Nucleus instance mask | `cellpose_mask_path` (legacy column name) | `0` for background and positive instance IDs for nuclei | Converted into two model-input channels |
 | Astrocyte annotation | `annotation_path` | Binary GFAP-positive target used as ground truth | Used only for training and evaluation |
 
-The Cellpose nucleus mask is needed for **every image passed through the model**,
+The nucleus instance mask is needed for **every image passed through the model**,
 including unlabeled images used only for prediction. An astrocyte annotation is
 needed only when the image is used for supervised training or evaluation.
 
@@ -89,13 +91,14 @@ This means that it is normal to have:
 - manually corrected astrocyte annotations for only a small subset;
 - no astrocyte annotation yet for most images.
 
-Cellpose itself is not run by this repository. Run Cellpose externally, keep its
-original instance-label files unchanged, and place their paths in
-`cellpose_mask_path`.
+`prepare_dataset.py` detects nuclei internally from DAPI and writes the resulting
+instance-label path to `cellpose_mask_path`. The column keeps its historical name
+for compatibility with the existing dataset and training code. External Cellpose
+labels remain supported as an optional alternative.
 
 ### Files required by each operation
 
-| Operation | OME-TIFF | GFAP channel name | Cellpose nucleus mask | Astrocyte annotation |
+| Operation | Microscopy TIFF | GFAP channel | Nucleus instance mask | Astrocyte annotation |
 |---|---:|---:|---:|---:|
 | Optional channel/QC export | Yes | Yes | Only for nucleus QC | No |
 | Supervised training | Yes | Yes | Yes | Yes |
@@ -146,9 +149,10 @@ the target. One item returned by `AstrocyteDataset` is:
 ```
 
 Training constructs these arrays lazily from the paths in the manifest. The
-intermediate files generated by `extract_channels.py`,
+intermediate files generated by `prepare_dataset.py`, `extract_channels.py`,
 `generate_nucleus_inputs.py`, and `create_patches.py` are useful for inspection,
-QC, and debugging, but training does not read them.
+QC, and debugging. Training reads the generated instance-label path from the
+manifest but constructs the binary mask and proximity channel lazily.
 
 ## Repository structure
 
@@ -201,6 +205,8 @@ astrocytes_morphology_detection/
 |---|---|---|
 | `io/ome_tiff.py` | `load_ome_tiff`, `get_channel` | Loads OME-TIFF data, normalizes axes to channel-first form, reads channel names and pixel size, and retrieves channels explicitly by name. |
 | `io/manifest.py` | `ManifestRow`, `load_manifest` | Defines and validates the one-row-per-image data contract. It rejects missing columns, duplicate IDs, invalid states, and annotated rows without an annotation path. |
+| `preprocessing/channels.py` | `select_model_channels` | Uses explicit metadata when available and automatically maps RGB composites to Blue DAPI plus the stronger Red/Green structural channel. |
+| `preprocessing/nucleus_detection.py` | `detect_nucleus_instances` | Detects bright DAPI nuclei with percentile normalization, Gaussian smoothing, Otsu thresholding, and marker watershed. |
 | `preprocessing/normalize.py` | `percentile_normalize` | Scales GFAP intensities to `[0, 1]` for model input. The result is not intended for biological intensity comparisons. |
 | `preprocessing/nuclei.py` | `validate_nucleus_labels`, `labels_to_binary_mask` | Checks exact image alignment and valid instance labels, then converts all positive nucleus IDs to foreground. |
 | `preprocessing/distance_maps.py` | `create_nucleus_proximity_map` | Converts the binary nucleus mask into a bounded distance-derived context channel. |
@@ -229,8 +235,7 @@ Raw data should remain unchanged. A typical source layout is:
 data/raw/<experiment_id>/<original_file_name>.ome.tif
 ```
 
-Cellpose nucleus labels may be stored anywhere referenced by the manifest. If
-they are kept inside the project, a clear convention is:
+Automatically detected nucleus labels are stored as:
 
 ```text
 data/interim/nucleus_labels/<image_id>_nuclei.tiff
@@ -255,7 +260,7 @@ outputs/pseudo_labels/overlays/<image_id>.png
 The project follows four preservation rules:
 
 1. Never modify raw microscopy images.
-2. Never modify original Cellpose files.
+2. Regenerate only derived internal masks; never modify optional external Cellpose files.
 3. Archive imported human exports before deriving binary masks.
 4. Never store automatic predictions in the human-annotation directories.
 
@@ -276,7 +281,7 @@ Every microscopy image has one row in a CSV manifest, normally
 | `path` | Source OME-TIFF path | Always |
 | `gfap_channel` | Exact GFAP channel name in OME metadata | Before preprocessing, training, or prediction |
 | `dapi_channel` | Exact DAPI channel name | Before DAPI/QC export |
-| `cellpose_mask_path` | Cellpose nucleus instance-label file | Before training, evaluation, or prediction |
+| `cellpose_mask_path` | Active nucleus instance-label file; name retained for compatibility | Filled automatically by `prepare_dataset.py` |
 | `annotation_path` | Active binary astrocyte target or pseudo mask | Required when status is not `none` |
 | `annotation_status` | `none`, `seed`, `pseudo`, `corrected`, or `reviewed` | Always |
 | `annotation_source` | Human or model provenance | When an annotation exists |
@@ -400,9 +405,58 @@ Maintain two conceptual data paths:
 1. normalized images for model input;
 2. raw or minimally processed intensities for quantitative fluorescence analysis.
 
+### Automatic nucleus instance detection
+
+`detect_nucleus_instances` runs directly on the selected DAPI channel. It does not
+require a separately trained neural network or nucleus annotations. The default
+pipeline is:
+
+1. percentile-normalize DAPI to `[0, 1]`;
+2. apply Gaussian smoothing (`sigma=1.2`);
+3. calculate an Otsu foreground threshold;
+4. remove foreground components smaller than 30 pixels;
+5. fill holes inside detected nuclei;
+6. find distance-transform peaks at least 7 pixels apart;
+7. use marker watershed to split touching nuclei;
+8. save sequential `uint32` instance labels.
+
+These defaults produced 341 instances on `7d_453.tif`. They are configurable from
+the command line and must be checked on additional acquisition conditions before
+being treated as final scientific settings.
+
+#### What this detector is, and what it is not
+
+The current nucleus detector is a **classical image-processing detector**, not a
+neural network. Watershed is the final instance-separation algorithm: it divides a
+foreground region around distance-map peaks so touching nuclei receive different
+integer IDs. Watershed by itself does not learn weights from data.
+
+This is an intentional baseline for the current repository because there are no
+human-validated nucleus masks available for supervised training. Training a U-Net
+on masks produced by this same classical detector would only teach the network to
+imitate its errors; it would not provide independent evidence of improved nucleus
+segmentation. The classical path is also deterministic, lightweight, and easy to
+audit while the DAPI signal remains clear.
+
+A future neural alternative would use a **Deep Watershed** design:
+
+```text
+DAPI image
+    -> trained neural network
+    -> predicted nucleus-interior and boundary/distance maps
+    -> watershed post-processing
+    -> nucleus instance labels
+```
+
+That upgrade requires either a compatible pretrained fluorescence-nucleus model or
+a small set of manually validated nucleus instance masks. The downstream contract
+would remain unchanged: background is `0`, every nucleus has a positive integer ID,
+and the binary/proximity inputs are generated exactly as they are now. This allows
+the detector to be replaced later without restructuring the astrocyte pipeline.
+
 ### Nucleus binary mask
 
-Cellpose labels are expected to be a 2D instance image:
+Internal and optional external labels use the same 2D instance-image contract:
 
 ```text
 0 = background
@@ -678,16 +732,31 @@ python scripts/build_manifest.py \
 ```
 
 The builder recursively discovers TIFF files, creates stable image IDs from paths,
-and initializes new rows with `annotation_status=none`. It does not guess channel
-names or experimental metadata.
+and initializes new rows with `annotation_status=none`. It does not guess
+experimental metadata. The next command can fill supported channel mappings.
 
-Open the CSV and fill in the channel names and metadata needed for your analysis.
+Fill in experimental metadata needed for grouping and analysis. Supported RGB and
+named OME channel mappings do not need to be entered image by image.
 
-### 3. Run Cellpose nucleus detection externally
+### 3. Automatically separate channels and detect nuclei
 
-Run Cellpose for all images that will enter training, evaluation, or prediction.
-Keep the original instance-label files and add their paths to
-`cellpose_mask_path`.
+Run one command for every row in the manifest:
+
+```powershell
+.\.python311\python.exe scripts\prepare_dataset.py
+```
+
+For RGB TIFFs, the command uses Blue as DAPI and automatically chooses the stronger
+of Red or Green as GFAP. Named OME channels use their metadata. It then detects
+nuclei, updates `gfap_channel`, `dapi_channel`, and `cellpose_mask_path`, and saves:
+
+```text
+data/interim/channels/                  extracted GFAP and DAPI arrays
+data/interim/nucleus_labels/            internal instance-label TIFFs
+data/interim/nucleus_masks/             binary nucleus inputs
+data/interim/nucleus_distance_maps/     proximity inputs
+data/interim/qc/                        previews, montage, preparation report
+```
 
 Expected nucleus-mask contract:
 
@@ -697,9 +766,20 @@ Expected nucleus-mask contract:
 positive integer = nucleus instance ID
 ```
 
-### 4. Generate optional preprocessing outputs and QC
+Inspect `data/interim/qc/<image_id>_montage.png`. The montage includes GFAP, DAPI,
+instance labels, binary nuclei, and the proximity map.
 
-Export named GFAP and DAPI arrays plus previews:
+The nucleus result in this command comes from the classical detector described
+above. It is automatic for every manifest image, but it is not a learned model.
+Always inspect the QC montage when adding a new microscope, magnification, staining
+condition, or image resolution.
+
+### 4. Optional separate preprocessing commands
+
+The unified command above replaces the need to run these manually. They remain
+available when debugging one stage or when using externally generated labels.
+
+Export already selected GFAP and DAPI arrays plus previews:
 
 ```bash
 python scripts/extract_channels.py \
@@ -707,8 +787,8 @@ python scripts/extract_channels.py \
   --output-dir data/interim/channels
 ```
 
-Validate nucleus labels and generate binary masks, proximity maps, previews, and
-QC montages:
+Validate existing internal or external nucleus labels and regenerate masks,
+proximity maps, previews, and QC montages:
 
 ```bash
 python scripts/generate_nucleus_inputs.py \
@@ -980,8 +1060,9 @@ exists.
 | Script | Reads | Writes | Purpose |
 |---|---|---|---|
 | `build_manifest.py` | Raw TIFF directory | Manifest CSV | Discovers images and creates conservative empty metadata rows. |
+| `prepare_dataset.py` | Manifest and microscopy TIFFs | Channels, internal nucleus labels, model inputs, QC, updated manifest | Automatically prepares all images in one batch command. |
 | `extract_channels.py` | Manifest and OME-TIFFs | GFAP/DAPI `.npy` files and previews | Makes channel selection easy to inspect. |
-| `generate_nucleus_inputs.py` | Manifest, images, Cellpose masks | Binary masks, proximity maps, previews, montages | Validates nucleus alignment and visualizes the model inputs. |
+| `generate_nucleus_inputs.py` | Manifest, images, existing nucleus labels | Binary masks, proximity maps, previews, montages | Validates nucleus alignment and visualizes the model inputs. |
 | `create_patches.py` | Manifest images | Patch-index CSV | Records deterministic patch coordinates without copying pixel arrays. |
 | `import_existing_annotations.py` | Manifest and image-mask pair CSV | Archived originals, binary masks, QC overlays, new manifest | Adds seed/corrected/reviewed human targets non-destructively. |
 | `train.py` | YAML config and annotated manifest | Checkpoints, history, optional fold assignments | Trains the configured baseline or runs the synthetic smoke test. |
@@ -1097,11 +1178,10 @@ biological validity or model accuracy on the research dataset.
 Check the requested `split`, `annotation_status`, and `annotation_path`. By default,
 `none` and `pseudo` rows are intentionally excluded from supervised datasets.
 
-### `Cellpose mask file does not exist`
+### `Nucleus mask file does not exist`
 
-Populate `cellpose_mask_path` and check whether the path is relative to the project
-root or manifest directory. A nucleus mask is required even for prediction-only
-images.
+Run `prepare_dataset.py`, or populate `cellpose_mask_path` with an external label
+file. A nucleus mask is required even for prediction-only images.
 
 ### Annotation or nucleus shape does not match the image
 
@@ -1111,8 +1191,9 @@ resolution.
 
 ### Requested GFAP channel is missing
 
-Inspect the actual OME channel names and copy the exact GFAP name into the
-manifest. The code intentionally refuses to infer a channel by position.
+Inspect the actual channel names. RGB Red/Green/Blue and explicit GFAP/DAPI OME
+names are selected automatically; other unnamed layouts require explicit manifest
+values.
 
 ### Grouped cross-validation has too few groups
 
@@ -1133,7 +1214,14 @@ decision.
 
 ## Current limitations
 
-- Cellpose execution is external; this project consumes existing nucleus masks.
+- Internal nucleus detection uses classical Otsu, distance peaks, and watershed; it
+  is automatic but is not a neural network and must be validated on every new image
+  condition.
+- Deep Watershed is not currently implemented. Adding it responsibly requires a
+  compatible pretrained model or manually validated nucleus instance masks; the
+  existing label-file interface is designed so such a model can replace the current
+  detector without changing downstream training.
+- External Cellpose labels remain supported, but Cellpose execution is not embedded.
 - The supported scientific target is binary GFAP-positive structure segmentation.
 - The multiclass configuration is future scaffolding, not a completed experiment.
 - SegFormer is an explicit `NotImplementedError` placeholder.
@@ -1147,7 +1235,7 @@ decision.
 
 ## Development principles
 
-- Preserve raw microscopy, Cellpose outputs, and original annotation exports.
+- Preserve raw microscopy, optional Cellpose outputs, and original annotation exports.
 - Keep human-reviewed targets separate from automatic predictions.
 - Use the manifest as the source of truth for paths, metadata, and lifecycle state.
 - Define image/well splits before creating patches.

@@ -1,10 +1,10 @@
-"""Validation and conversion of Cellpose nucleus labels."""
+"""Validation and conversion of nucleus instance labels."""
 
 import numpy as np
 
 
 def validate_nucleus_labels(labels: np.ndarray, image_shape: tuple[int, int]) -> None:
-    """Validate a Cellpose nucleus instance-label array against its source image.
+    """Validate a nucleus instance-label array against its source image.
 
     Labels must be aligned, two-dimensional, finite, non-negative, and integer
     valued. The function raises on invalid data and does not modify the array.
@@ -26,7 +26,7 @@ def validate_nucleus_labels(labels: np.ndarray, image_shape: tuple[int, int]) ->
 
 
 def labels_to_binary_mask(labels: np.ndarray) -> np.ndarray:
-    """Convert validated Cellpose instances into a binary nucleus plane.
+    """Convert validated nucleus instances into a binary nucleus plane.
 
     Every positive instance identifier becomes one and background remains zero.
     The output is float32 for direct stacking with other model input channels.

@@ -50,7 +50,7 @@ def save_grayscale_preview(
 
 
 def save_nucleus_label_preview(labels: np.ndarray, output_path: str | Path) -> None:
-    """Save a categorical preview of Cellpose nucleus instance identifiers.
+    """Save a categorical preview of nucleus instance identifiers.
 
     A spectral visualization separates adjacent integer instances visually; the
     colors are display-only and have no role in preprocessing or analysis.
@@ -61,7 +61,7 @@ def save_nucleus_label_preview(labels: np.ndarray, output_path: str | Path) -> N
 def save_nucleus_mask_preview(mask: np.ndarray, output_path: str | Path) -> None:
     """Save a grayscale preview of the derived binary nucleus mask.
 
-    The output helps verify that all positive Cellpose instances became foreground
+    The output helps verify that all positive nucleus instances became foreground
     and that the mask remains aligned with the microscopy field.
     """
     _save_preview(mask, output_path, "gray", "Nucleus mask")
@@ -84,21 +84,30 @@ def save_qc_montage(
     output_path: str | Path,
     ground_truth: np.ndarray | None = None,
     prediction: np.ndarray | None = None,
+    dapi: np.ndarray | None = None,
 ) -> None:
     """Save a compact QC montage of aligned preprocessing and segmentation planes.
 
-    GFAP, nucleus labels, binary mask, and proximity are always shown; ground truth
-    and prediction panels are appended when provided. All arrays must share shape.
+    GFAP, nucleus labels, binary mask, and proximity are always shown. DAPI,
+    ground truth, and prediction panels are appended when provided.
     """
     arrays = [gfap, nucleus_labels, nucleus_mask, proximity_map]
     if any(array.ndim != 2 or array.shape != gfap.shape for array in arrays):
         raise ValueError("All QC inputs must be aligned 2D arrays")
     panels: list[tuple[str, np.ndarray, str]] = [
         ("GFAP", gfap, "gray"),
-        ("Nucleus labels", nucleus_labels, "nipy_spectral"),
-        ("Nucleus mask", nucleus_mask, "gray"),
-        ("Proximity", proximity_map, "magma"),
     ]
+    if dapi is not None:
+        if dapi.shape != gfap.shape:
+            raise ValueError("DAPI shape does not match GFAP shape")
+        panels.append(("DAPI", dapi, "gray"))
+    panels.extend(
+        [
+            ("Nucleus labels", nucleus_labels, "nipy_spectral"),
+            ("Nucleus mask", nucleus_mask, "gray"),
+            ("Proximity", proximity_map, "magma"),
+        ]
+    )
     for title, optional in (("Ground truth", ground_truth), ("Prediction", prediction)):
         if optional is not None:
             if optional.shape != gfap.shape:

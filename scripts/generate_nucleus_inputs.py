@@ -1,4 +1,4 @@
-"""Create binary nucleus masks, proximity maps, and preprocessing QC images."""
+"""Create model inputs and QC from existing nucleus instance labels."""
 
 import argparse
 from pathlib import Path
@@ -34,7 +34,7 @@ def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
 
 
 def _load_labels(path: Path) -> np.ndarray:
-    """Load a Cellpose label array from NumPy or TIFF storage.
+    """Load a nucleus instance-label array from NumPy or TIFF storage.
 
     The array is returned unchanged for shared structural validation; unsupported
     formats naturally fail instead of being interpreted through filename guessing.
@@ -50,7 +50,7 @@ def generate_nucleus_inputs(
 ) -> int:
     """Generate binary nucleus and proximity inputs for every manifest image.
 
-    Cellpose labels are shape-validated against OME dimensions before NumPy arrays,
+    Nucleus labels are shape-validated against image dimensions before NumPy arrays,
     individual previews, and an optional GFAP-aligned QC montage are written.
     """
     manifest = load_manifest(manifest_path)
@@ -62,7 +62,7 @@ def generate_nucleus_inputs(
         if not row["cellpose_mask_path"].strip():
             raise ValueError(f"cellpose_mask_path is empty for {row['image_id']!r}")
         microscopy = load_ome_tiff(_resolve_path(row["path"], manifest_path, "Image"))
-        labels = _load_labels(_resolve_path(row["cellpose_mask_path"], manifest_path, "Cellpose mask"))
+        labels = _load_labels(_resolve_path(row["cellpose_mask_path"], manifest_path, "Nucleus mask"))
         validate_nucleus_labels(labels, microscopy.image.shape[-2:])
         binary = labels_to_binary_mask(labels)
         proximity = create_nucleus_proximity_map(binary, max_distance)
