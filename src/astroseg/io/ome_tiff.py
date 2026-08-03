@@ -1,4 +1,4 @@
-"""OME-TIFF loading with explicit channel-axis handling."""
+"""Microscopy TIFF loading with explicit channel-axis handling."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,10 +96,11 @@ def _parse_ome_metadata(xml: str | None, channel_count: int) -> tuple[list[str],
 
 
 def load_ome_tiff(path: str | Path) -> MicroscopyImage:
-    """Load one OME-TIFF series without changing its numeric dtype.
+    """Load one microscopy TIFF series without changing its numeric dtype.
 
     Singleton time and depth axes are removed. Non-singleton time/depth axes are
     rejected because choosing a plane implicitly would be scientifically unsafe.
+    Standard non-OME RGB samples receive explicit Red, Green, and Blue names.
     """
     source = Path(path)
     if not source.is_file():
@@ -111,6 +112,16 @@ def load_ome_tiff(path: str | Path) -> MicroscopyImage:
         array = series.asarray()
         image = _normalize_axes(array, series.axes, source)
         channel_names, pixel_size = _parse_ome_metadata(tif.ome_metadata, image.shape[0])
+        photometric = series.pages[0].photometric.name if len(series.pages) else ""
+        if (
+            not any(channel_names)
+            and series.axes.upper() == "YXS"
+            and image.shape[0] in {3, 4}
+            and photometric == "RGB"
+        ):
+            channel_names = ["Red", "Green", "Blue"]
+            if image.shape[0] == 4:
+                channel_names.append("Alpha")
     return MicroscopyImage(
         image=image,
         channel_names=channel_names,

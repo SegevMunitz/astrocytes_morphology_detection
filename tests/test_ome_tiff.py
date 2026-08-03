@@ -46,10 +46,25 @@ def test_get_channel_exact_then_case_insensitive(tmp_path: Path) -> None:
         get_channel(image, "GFA")
 
 
+def test_load_non_ome_rgb_assigns_sample_names(tmp_path: Path) -> None:
+    """Standard RGB TIFF samples receive explicit color-channel names."""
+    path = tmp_path / "composite.tif"
+    array = np.zeros((12, 10, 3), dtype=np.uint8)
+    array[..., 1] = 17
+    array[..., 2] = 29
+    tifffile.imwrite(path, array, photometric="rgb")
+
+    loaded = load_ome_tiff(path)
+
+    assert loaded.image.shape == (3, 12, 10)
+    assert loaded.channel_names == ["Red", "Green", "Blue"]
+    np.testing.assert_array_equal(get_channel(loaded, "Green"), array[..., 1])
+    np.testing.assert_array_equal(get_channel(loaded, "blue"), array[..., 2])
+
+
 def test_load_rejects_non_singleton_depth(tmp_path: Path) -> None:
     """Loader refuses to silently choose among multiple Z planes."""
     path = tmp_path / "stack.ome.tiff"
     tifffile.imwrite(path, np.zeros((2, 2, 8, 8), dtype=np.uint8), ome=True, metadata={"axes": "ZCYX"})
     with pytest.raises(ValueError, match="non-singleton"):
         load_ome_tiff(path)
-

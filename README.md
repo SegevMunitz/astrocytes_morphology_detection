@@ -1,7 +1,7 @@
 # Astrocyte Segmentation Pipeline
 
 A research-oriented image-analysis project for segmenting GFAP-positive astrocyte
-structures in multichannel OME-TIFF microscopy images.
+structures in multichannel microscopy TIFF and OME-TIFF images.
 
 The repository implements the complete baseline path from microscopy files and
 Cellpose nucleus labels to patch-based U-Net training, full-resolution prediction,
@@ -360,11 +360,18 @@ remain available for later work even though the current target is binary.
 
 ## Preprocessing in detail
 
-### OME-TIFF loading
+### Microscopy TIFF loading
 
 `load_ome_tiff` reads the image and OME metadata, normalizes supported layouts to
 channel-first `[C, H, W]`, and records channel names and physical pixel size when
 available. Unsupported dimensions or ambiguous channel requests fail explicitly.
+
+Standard non-OME RGB TIFFs with `YXS` axes are also supported. Because their color
+samples have no biological metadata, the loader exposes them as `Red`, `Green`,
+and `Blue`; the manifest must still state which color represents GFAP and DAPI for
+each image. For example, use `gfap_channel=Green, dapi_channel=Blue` for a
+green/blue composite and `gfap_channel=Red, dapi_channel=Blue` for a red/blue
+composite.
 
 Use exact OME channel names in the manifest. The loader does not assume that a
 fixed channel index is always GFAP.

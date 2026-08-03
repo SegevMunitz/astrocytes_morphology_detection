@@ -28,7 +28,8 @@ def extract_channels(manifest_path: Path, output_directory: Path) -> int:
     """Extract explicitly named GFAP and DAPI channels for all manifest rows.
 
     Original-dtype NumPy arrays and labeled grayscale previews are written per
-    image. Missing or ambiguous OME channel names stop processing clearly.
+    image. Missing or ambiguous channel names stop processing clearly; standard
+    RGB TIFFs expose the explicit names Red, Green, and Blue.
     """
     manifest = load_manifest(manifest_path)
     output_directory.mkdir(parents=True, exist_ok=True)
