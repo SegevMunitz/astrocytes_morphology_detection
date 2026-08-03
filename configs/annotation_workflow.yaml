@@ -1,0 +1,16 @@
+human_annotation_directory: data/annotations
+pseudo_label_directory: outputs/pseudo_labels
+
+import:
+  default_status: seed
+  default_source: manual_cellpose_correction
+
+selection:
+  annotation_statuses:
+    - none
+    - pseudo
+  patch_size: 512
+  overlap: 64
+  top_k: 20
+  max_patches_per_image: 5
+

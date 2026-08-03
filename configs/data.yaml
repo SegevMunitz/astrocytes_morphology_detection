@@ -3,4 +3,9 @@ patch_size: 512
 overlap: 64
 num_workers: 4
 max_nucleus_distance: 64.0
-
+train_annotation_statuses:
+  - seed
+  - corrected
+  - reviewed
+human_annotation_directory: data/annotations
+pseudo_label_directory: outputs/pseudo_labels

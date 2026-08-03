@@ -35,6 +35,7 @@ def create_patch_index(
                 {
                     "image_id": row["image_id"],
                     "split": row["split"],
+                    "annotation_status": row["annotation_status"],
                     "patch_index": patch_index,
                     "y": coordinates.y,
                     "x": coordinates.x,

@@ -1,6 +1,6 @@
 """Lazy patch dataset for astrocyte semantic segmentation."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +10,7 @@ import tifffile
 import torch
 from torch.utils.data import Dataset
 
+from astroseg.constants import ANNOTATION_STATUSES, TRAINABLE_ANNOTATION_STATUSES
 from astroseg.io.manifest import load_manifest, validate_manifest
 from astroseg.io.ome_tiff import MicroscopyImage, get_channel, load_ome_tiff
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
@@ -78,21 +79,37 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         overlap: int = 64,
         max_nucleus_distance: float = 64.0,
         augmentation: Augmentation | None = None,
+        annotation_statuses: Collection[str] | None = TRAINABLE_ANNOTATION_STATUSES,
+        manifest_base_directory: str | Path | None = None,
     ) -> None:
-        """Validate manifest files and index patches for one data split."""
+        """Validate files and index annotated patches for one data split.
+
+        By default, pseudo and unannotated rows are excluded. Pass an explicit
+        status collection to opt into a different policy, or ``None`` to disable
+        status filtering.
+        """
         if split not in {"train", "val", "test"}:
             raise ValueError("split must be one of train, val, or test")
         if isinstance(manifest, pd.DataFrame):
             frame = manifest.copy()
             validate_manifest(frame)
-            base_directory = Path.cwd()
+            base_directory = Path(manifest_base_directory) if manifest_base_directory else Path.cwd()
         else:
             manifest_path = Path(manifest)
             frame = load_manifest(manifest_path)
             base_directory = manifest_path.parent
-        self.manifest = frame.loc[frame["split"] == split].reset_index(drop=True)
+        selected = frame["split"] == split
+        if annotation_statuses is not None:
+            if isinstance(annotation_statuses, str):
+                raise TypeError("annotation_statuses must be a collection of states, not one string")
+            normalized_statuses = {str(status).strip().lower() for status in annotation_statuses}
+            invalid_statuses = normalized_statuses - ANNOTATION_STATUSES
+            if invalid_statuses:
+                raise ValueError(f"Invalid dataset annotation statuses: {sorted(invalid_statuses)}")
+            selected &= frame["annotation_status"].isin(normalized_statuses)
+        self.manifest = frame.loc[selected].reset_index(drop=True)
         if self.manifest.empty:
-            raise ValueError(f"Manifest contains no rows for split {split!r}")
+            raise ValueError(f"Manifest contains no eligible annotated rows for split {split!r}")
         self.patch_size = patch_size
         self.overlap = overlap
         self.max_nucleus_distance = max_nucleus_distance

@@ -36,7 +36,7 @@ def build_manifest(raw_directory: Path, output_path: Path) -> pd.DataFrame:
             suffix = hashlib.sha1(relative.encode("utf-8")).hexdigest()[:8]
             image_id = f"{path.stem}_{suffix}"
         row = {column: "" for column in MANIFEST_COLUMNS}
-        row.update({"image_id": image_id, "path": _display_path(path)})
+        row.update({"image_id": image_id, "path": _display_path(path), "annotation_status": "none"})
         rows.append(row)
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,4 +61,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -10,9 +10,11 @@ import yaml
 from torch.utils.data import DataLoader
 
 from astroseg.datasets import AstrocyteDataset, collate_segmentation_batch
+from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
 from astroseg.models import build_model
 from astroseg.training.checkpoints import load_checkpoint
 from astroseg.training.metrics import metrics_from_logits
+from astroseg.training.cross_validation import load_grouped_fold_manifests
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -41,12 +43,36 @@ def evaluate_checkpoint(
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
     data_config = configuration["data"]
+    annotation_statuses = data_config.get(
+        "train_annotation_statuses", sorted(TRAINABLE_ANNOTATION_STATUSES)
+    )
+    manifest_path = Path(data_config["manifest_path"])
+    cross_validation = configuration.get("cross_validation", {})
+    dataset_manifest: Path | pd.DataFrame
+    dataset_split = split
+    manifest_base_directory: Path | None = None
+    if cross_validation.get("enabled", False) and split in {"train", "val"}:
+        train_manifest, validation_manifest = load_grouped_fold_manifests(
+            manifest_path,
+            int(cross_validation.get("n_splits", 5)),
+            int(cross_validation.get("validation_fold", 0)),
+            str(cross_validation.get("group_column", "image_id")),
+            str(cross_validation.get("fold_column", "fold")),
+            int(configuration.get("seed", 42)),
+            annotation_statuses,
+        )
+        dataset_manifest = train_manifest if split == "train" else validation_manifest
+        manifest_base_directory = manifest_path.parent
+    else:
+        dataset_manifest = manifest_path
     dataset = AstrocyteDataset(
-        data_config["manifest_path"],
-        split,
+        dataset_manifest,
+        dataset_split,
         int(data_config["patch_size"]),
         int(data_config["overlap"]),
         float(data_config.get("max_nucleus_distance", 64.0)),
+        annotation_statuses=annotation_statuses,
+        manifest_base_directory=manifest_base_directory,
     )
     loader = DataLoader(
         dataset,
@@ -98,4 +124,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

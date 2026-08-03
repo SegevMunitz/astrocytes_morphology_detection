@@ -10,7 +10,14 @@ from torch.utils.data import DataLoader
 
 from astroseg.datasets import AstrocyteDataset, RandomFlip, collate_segmentation_batch
 from astroseg.models import build_model
-from astroseg.training import CrossEntropyDiceLoss, run_overfit_smoke_test, set_deterministic_seed, train_model
+from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
+from astroseg.training import (
+    CrossEntropyDiceLoss,
+    load_grouped_fold_manifests,
+    run_overfit_smoke_test,
+    set_deterministic_seed,
+    train_model,
+)
 
 
 def load_configuration(path: Path) -> dict[str, Any]:
@@ -32,14 +39,40 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
     set_deterministic_seed(int(configuration.get("seed", 42)))
     data_config = configuration["data"]
     manifest_path = Path(data_config["manifest_path"])
+    annotation_statuses = data_config.get(
+        "train_annotation_statuses", sorted(TRAINABLE_ANNOTATION_STATUSES)
+    )
     common = {
-        "manifest": manifest_path,
         "patch_size": int(data_config["patch_size"]),
         "overlap": int(data_config["overlap"]),
         "max_nucleus_distance": float(data_config.get("max_nucleus_distance", 64.0)),
+        "annotation_statuses": annotation_statuses,
     }
-    train_dataset = AstrocyteDataset(split="train", augmentation=RandomFlip(), **common)
-    validation_dataset = AstrocyteDataset(split="val", augmentation=None, **common)
+    cross_validation = configuration.get("cross_validation", {})
+    if cross_validation.get("enabled", False):
+        train_manifest, validation_manifest = load_grouped_fold_manifests(
+            manifest_path,
+            int(cross_validation.get("n_splits", 5)),
+            int(cross_validation.get("validation_fold", 0)),
+            str(cross_validation.get("group_column", "image_id")),
+            str(cross_validation.get("fold_column", "fold")),
+            int(configuration.get("seed", 42)),
+            annotation_statuses,
+        )
+        frame_common = {"manifest_base_directory": manifest_path.parent}
+        train_dataset = AstrocyteDataset(
+            train_manifest, split="train", augmentation=RandomFlip(), **common, **frame_common
+        )
+        validation_dataset = AstrocyteDataset(
+            validation_manifest, split="val", augmentation=None, **common, **frame_common
+        )
+    else:
+        train_dataset = AstrocyteDataset(
+            manifest_path, split="train", augmentation=RandomFlip(), **common
+        )
+        validation_dataset = AstrocyteDataset(
+            manifest_path, split="val", augmentation=None, **common
+        )
     batch_size = int(configuration["training"]["batch_size"])
     num_workers = int(data_config.get("num_workers", 0))
     train_loader = DataLoader(
@@ -87,6 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--smoke-steps", type=int, default=25)
+    parser.add_argument("--fold", type=int, help="Override cross_validation.validation_fold")
     return parser.parse_args()
 
 
@@ -99,10 +133,13 @@ def main() -> None:
         return
     if args.config is None:
         raise SystemExit("--config is required unless --smoke-test is used")
-    history = train_from_configuration(load_configuration(args.config))
+    configuration = load_configuration(args.config)
+    if args.fold is not None:
+        configuration.setdefault("cross_validation", {})["enabled"] = True
+        configuration["cross_validation"]["validation_fold"] = args.fold
+    history = train_from_configuration(configuration)
     print(f"Completed {len(history)} training epochs")
 
 
 if __name__ == "__main__":
     main()
-

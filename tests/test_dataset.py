@@ -41,6 +41,8 @@ def _write_dataset_files(tmp_path: Path) -> Path:
             "dapi_channel": "DAPI",
             "cellpose_mask_path": str(labels_path),
             "annotation_path": str(annotation_path),
+            "annotation_status": "seed",
+            "annotation_source": "synthetic_test",
             "split": "train",
         }
     )
@@ -59,6 +61,27 @@ def test_dataset_returns_expected_tensor_shapes(tmp_path: Path) -> None:
     assert item["target"].dtype == torch.long
     assert item["image_id"] == "image"
     assert torch.all((item["image"] >= 0) & (item["image"] <= 1))
+
+
+def test_dataset_excludes_pseudo_annotations_by_default(tmp_path: Path) -> None:
+    """Automatic masks cannot enter training unless explicitly requested."""
+    manifest_path = _write_dataset_files(tmp_path)
+    manifest = pd.read_csv(manifest_path, dtype=str, keep_default_na=False)
+    pseudo = manifest.iloc[0].copy()
+    pseudo["image_id"] = "pseudo_image"
+    pseudo["annotation_status"] = "pseudo"
+    manifest = pd.concat((manifest, pseudo.to_frame().T), ignore_index=True)
+    manifest.to_csv(manifest_path, index=False)
+    default_dataset = AstrocyteDataset(manifest_path, "train", patch_size=16, overlap=4)
+    pseudo_dataset = AstrocyteDataset(
+        manifest_path,
+        "train",
+        patch_size=16,
+        overlap=4,
+        annotation_statuses=["pseudo"],
+    )
+    assert set(default_dataset.manifest["image_id"]) == {"image"}
+    assert set(pseudo_dataset.manifest["image_id"]) == {"pseudo_image"}
 
 
 def test_percentile_normalization_range_and_constant_handling() -> None:
@@ -92,4 +115,3 @@ def test_nucleus_validation_binary_mask_and_proximity() -> None:
 def test_proximity_without_nuclei_is_zero() -> None:
     """An empty nucleus mask has zero proximity everywhere."""
     assert not create_nucleus_proximity_map(np.zeros((5, 6), dtype=np.uint8)).any()
-

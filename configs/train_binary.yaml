@@ -6,6 +6,10 @@ data:
   overlap: 64
   num_workers: 4
   max_nucleus_distance: 64.0
+  train_annotation_statuses:
+    - seed
+    - corrected
+    - reviewed
 
 model:
   architecture: unet
@@ -25,6 +29,15 @@ loss:
   dice_weight: 1.0
   include_background_in_dice: false
 
+# Enable this block for small-data image-level or well-level cross-validation.
+# For well-level grouping, add a non-empty well_id column to the manifest and
+# set group_column: well_id. All patches inherit their image's fold.
+cross_validation:
+  enabled: false
+  n_splits: 5
+  validation_fold: 0
+  group_column: image_id
+  fold_column: fold
+
 output:
   directory: outputs/checkpoints/binary_baseline
-

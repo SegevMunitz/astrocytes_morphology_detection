@@ -237,10 +237,22 @@ data/interim/nucleus_masks/<image_id>_nuclei.tif
 Annotations should be stored using the same `image_id`:
 
 ```text
-data/annotations/binary/<image_id>_mask.tif
+data/annotations/originals/<image_id>/<status>_<content_hash>.<ext>
+data/annotations/binary/<image_id>_<status>_binary.tiff
+data/annotations/qc/<image_id>_<status>_annotation_overlay.png
 ```
 
-Never overwrite raw microscopy images.
+Automatic predictions and pseudo labels are stored separately:
+
+```text
+outputs/pseudo_labels/probabilities/<image_id>.npy
+outputs/pseudo_labels/masks/<image_id>.tiff
+outputs/pseudo_labels/overlays/<image_id>.png
+```
+
+Never overwrite raw microscopy images, original Cellpose files, or imported
+annotation exports. Imported masks are archived by content hash before a binary
+training target is created.
 
 ## Manifest
 
@@ -267,7 +279,23 @@ dapi_channel
 has_brightfield
 cellpose_mask_path
 annotation_path
+annotation_status
+annotation_source
+annotator
+review_status
+split
 ```
+
+`annotation_status` is required and must be one of:
+
+- `none`: no annotation is available
+- `seed`: manually corrected seed annotation
+- `pseudo`: automatic model prediction awaiting correction
+- `corrected`: a human corrected a seed or pseudo label
+- `reviewed`: a human-reviewed annotation ready for use
+
+By default, datasets train only on `seed`, `corrected`, and `reviewed` rows.
+Pseudo labels never enter training unless the configuration explicitly opts in.
 
 The code should not infer experimental groups from filenames during training. Filename parsing may be used to build the initial manifest, but all downstream code should rely on the manifest.
 
@@ -289,6 +317,39 @@ Store the split assignments in:
 ```text
 data/metadata/splits.csv
 ```
+
+For very small labeled datasets, grouped cross-validation can instead be enabled
+in the training configuration. Fold assignment happens at the manifest image or
+well level before patches are generated, so patches from one image cannot appear
+in different folds. Use `group_column: image_id` by default, or add an explicit
+non-empty `well_id` column and use `group_column: well_id`.
+
+## Seed annotation and correction workflow
+
+The supported iterative workflow is:
+
+```text
+manually corrected Cellpose seed masks
+    -> initial binary U-Net training
+    -> full-image predictions on annotation_status=none images
+    -> uncertainty-ranked patch selection
+    -> manual correction and review
+    -> import corrected masks
+    -> retraining on seed + corrected + reviewed masks
+```
+
+An import pair table minimally contains:
+
+```csv
+image_id,mask_path,annotation_status,annotation_source,annotator,review_status
+image_001,exports/image_001_instances.tiff,seed,cellpose_manual_correction,AB,pending
+```
+
+Image identity, exact dimensions, numeric non-negative labels, and the named GFAP
+channel are validated. The generated overlay must still be inspected because
+dimensions alone cannot prove biological registration when source TIFF metadata
+is incomplete. Instance IDs are converted to a binary target (`0` background,
+`1` GFAP-positive structure) while the instance-valued source is retained.
 
 ## Preprocessing
 
@@ -436,6 +497,10 @@ data:
   patch_size: 512
   overlap: 64
   num_workers: 4
+  train_annotation_statuses:
+    - seed
+    - corrected
+    - reviewed
 
 model:
   architecture: unet
@@ -453,6 +518,13 @@ training:
 loss:
   cross_entropy_weight: 1.0
   dice_weight: 1.0
+
+cross_validation:
+  enabled: false
+  n_splits: 5
+  validation_fold: 0
+  group_column: image_id
+  fold_column: fold
 
 output:
   directory: outputs/checkpoints/binary_baseline
@@ -579,10 +651,61 @@ python scripts/generate_nucleus_inputs.py \
   --output-dir data/interim
 ```
 
+Import initial manually corrected Cellpose astrocyte masks. The input exports are
+copied unchanged before binary masks are created:
+
+```bash
+python scripts/import_existing_annotations.py \
+  --manifest data/metadata/manifest.csv \
+  --pairs-csv data/metadata/seed_annotation_pairs.csv \
+  --output-dir data/annotations \
+  --output-manifest data/metadata/manifest_seed.csv \
+  --status seed \
+  --annotator AB
+```
+
+Point `data.manifest_path` in the training configuration at the seed manifest,
+then train normally or choose a grouped validation fold:
+
 ```bash
 python scripts/train.py \
   --config configs/train_binary.yaml
 ```
+
+```bash
+python scripts/train.py \
+  --config configs/train_binary.yaml \
+  --fold 0
+```
+
+Generate automatic labels only for rows in state `none`. This writes a new
+manifest and keeps automatic files under `outputs/`:
+
+```bash
+python scripts/generate_pseudo_labels.py \
+  --config configs/train_binary.yaml \
+  --checkpoint outputs/checkpoints/binary_baseline/best.pt \
+  --output-dir outputs/pseudo_labels \
+  --output-manifest data/metadata/manifest_with_pseudo.csv
+```
+
+Rank uncertain pseudo-labeled patches for manual correction:
+
+```bash
+python scripts/select_unlabeled_patches.py \
+  --manifest data/metadata/manifest_with_pseudo.csv \
+  --probability-dir outputs/pseudo_labels/probabilities \
+  --output data/metadata/annotation_queue.csv \
+  --patch-size 512 \
+  --overlap 64 \
+  --top-k 20 \
+  --max-patches-per-image 5
+```
+
+After correction, import the new masks with `--status corrected` and a new output
+manifest, update `data.manifest_path`, and rerun training. `--overwrite` permits a
+new lifecycle state to replace the active binary target for an image; archived
+content-addressed originals are never overwritten.
 
 ```bash
 python scripts/evaluate.py \
