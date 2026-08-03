@@ -1,0 +1,31 @@
+# Infrastructure-only configuration: multiclass annotations are not yet available.
+seed: 42
+
+data:
+  manifest_path: data/metadata/manifest.csv
+  patch_size: 512
+  overlap: 64
+  num_workers: 4
+  max_nucleus_distance: 64.0
+
+model:
+  architecture: unet
+  input_channels: 3
+  num_classes: 3
+  base_channels: 32
+
+training:
+  epochs: 100
+  batch_size: 8
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  early_stopping_patience: 15
+
+loss:
+  cross_entropy_weight: 1.0
+  dice_weight: 1.0
+  include_background_in_dice: false
+
+output:
+  directory: outputs/checkpoints/multiclass_baseline
+

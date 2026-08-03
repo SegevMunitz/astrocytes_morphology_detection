@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.venv*/
+.python311/
+.tools/
+.synthetic_demo/
+venv/
+.idea/
+.vscode/
+
+# Scientific data and generated outputs (directory placeholders are retained)
+data/raw/*
+data/interim/*/*
+data/annotations/*/*
+data/processed/*/*
+outputs/*/*
+!**/.gitkeep

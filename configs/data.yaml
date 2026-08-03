@@ -1,0 +1,6 @@
+manifest_path: data/metadata/manifest.csv
+patch_size: 512
+overlap: 64
+num_workers: 4
+max_nucleus_distance: 64.0
+
