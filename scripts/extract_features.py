@@ -11,7 +11,11 @@ from astroseg.analysis import extract_image_features
 
 
 def extract_feature_table(mask_directory: Path, output_path: Path, positive_class: int = 1) -> pd.DataFrame:
-    """Measure positive area, components, and skeleton topology for TIFF masks."""
+    """Measure preliminary field-level features for a directory of TIFF masks.
+
+    Each file becomes one row after selecting the configured positive class.
+    Area, component, skeleton, branch-pixel, and endpoint values are saved to CSV.
+    """
     if not mask_directory.is_dir():
         raise NotADirectoryError(f"Mask directory does not exist: {mask_directory}")
     paths = sorted(
@@ -31,7 +35,11 @@ def extract_feature_table(mask_directory: Path, output_path: Path, positive_clas
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse mask directory, output table, and positive-class arguments.
+
+    The positive class defaults to one for the binary baseline, while explicit
+    paths prevent feature extraction from scanning unrelated output directories.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mask-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -40,7 +48,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Write the preliminary field-level feature table."""
+    """Extract the feature table and report its image count and destination.
+
+    The summary deliberately labels measurements as preliminary because they are
+    field-level pixel statistics rather than validated biological cell features.
+    """
     args = parse_args()
     frame = extract_feature_table(args.mask_dir, args.output, args.positive_class)
     print(f"Wrote preliminary field-level features for {len(frame)} images to {args.output}")

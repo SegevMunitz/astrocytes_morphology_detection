@@ -9,7 +9,11 @@ from astroseg.postprocessing.skeleton import skeleton_statistics
 
 
 def extract_image_features(mask: np.ndarray) -> dict[str, Any]:
-    """Return preliminary field-level positive-area and skeleton measurements."""
+    """Measure positive area and skeleton topology for one binary image field.
+
+    Counts are reported in pixels and connected components, without conversion
+    to physical units. These are preliminary field-level, not cell-level, values.
+    """
     if mask.ndim != 2 or mask.size == 0:
         raise ValueError("mask must be a non-empty 2D array")
     binary = mask.astype(bool)
@@ -22,4 +26,3 @@ def extract_image_features(mask: np.ndarray) -> dict[str, Any]:
         "branch_point_count": skeleton["branch_point_count"],
         "endpoint_count": skeleton["endpoint_count"],
     }
-

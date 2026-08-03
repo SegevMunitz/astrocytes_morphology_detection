@@ -8,7 +8,11 @@ import numpy as np
 
 @dataclass(frozen=True)
 class PatchCoordinates:
-    """Immutable rectangular patch coordinates."""
+    """Immutable position and dimensions of one image patch.
+
+    Coordinates use a top-left ``y, x`` origin with explicit height and width.
+    They always refer to the final two spatial axes of an array.
+    """
 
     y: int
     x: int
@@ -17,6 +21,11 @@ class PatchCoordinates:
 
 
 def _starts(length: int, patch_size: int, stride: int) -> list[int]:
+    """Calculate one-dimensional patch starts including the final image border.
+
+    Images no larger than a patch receive origin zero only. Larger axes use the
+    regular stride and append a border-aligned start when necessary.
+    """
     if length <= patch_size:
         return [0]
     starts = list(range(0, length - patch_size + 1, stride))
@@ -31,7 +40,11 @@ def generate_patch_coordinates(
     patch_size: int = 512,
     overlap: int = 64,
 ) -> list[PatchCoordinates]:
-    """Generate row-major coordinates that completely cover an image."""
+    """Generate deterministic row-major patches covering an entire image.
+
+    A final border-aligned patch is added whenever the regular stride misses an
+    edge. Returned rectangles never extend outside the source dimensions.
+    """
     if len(image_shape) != 2 or any(not isinstance(v, int) or v <= 0 for v in image_shape):
         raise ValueError(f"image_shape must contain two positive integers; got {image_shape}")
     if not isinstance(patch_size, int) or patch_size <= 0:
@@ -50,7 +63,11 @@ def generate_patch_coordinates(
 
 
 def extract_patch(array: np.ndarray, coordinates: PatchCoordinates) -> np.ndarray:
-    """Extract a patch from the final two dimensions of an array."""
+    """Extract one validated rectangle from the final two array dimensions.
+
+    Leading dimensions such as channels are preserved unchanged. Coordinates
+    outside the spatial bounds fail instead of producing silently truncated data.
+    """
     if array.ndim < 2:
         raise ValueError("array must have at least two dimensions")
     if min(coordinates.y, coordinates.x, coordinates.height, coordinates.width) < 0:
@@ -69,7 +86,11 @@ def stitch_probability_patches(
     coordinates: Sequence[PatchCoordinates],
     image_shape: tuple[int, int],
 ) -> np.ndarray:
-    """Average overlapping ``[C, H, W]`` probability patches into one image."""
+    """Reconstruct a channel-first probability image from overlapping patches.
+
+    Values are accumulated in float64 and divided by per-pixel coverage counts,
+    then returned as float32. Uncovered pixels or inconsistent shapes raise errors.
+    """
     if len(patches) == 0 or len(patches) != len(coordinates):
         raise ValueError("patches and coordinates must have the same non-zero length")
     first = np.asarray(patches[0])

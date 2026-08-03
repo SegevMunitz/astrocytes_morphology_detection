@@ -22,7 +22,11 @@ Augmentation = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
 
 
 def collate_segmentation_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
-    """Collate tensor fields while retaining coordinates as immutable objects."""
+    """Collate segmentation tensors while retaining patch metadata as lists.
+
+    Image and target tensors are stacked for PyTorch, whereas image identifiers
+    and immutable coordinates remain aligned Python objects for evaluation.
+    """
     if not batch:
         raise ValueError("Cannot collate an empty batch")
     return {
@@ -34,6 +38,11 @@ def collate_segmentation_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _resolve_existing_path(value: str, base_directory: Path, field_name: str) -> Path:
+    """Resolve a manifest file reference against supported base locations.
+
+    Direct project-relative paths are tried before manifest-relative paths, and
+    the supplied field name is included when neither candidate exists.
+    """
     path = Path(value)
     candidates = [path] if path.is_absolute() else [path, base_directory / path]
     for candidate in candidates:
@@ -43,6 +52,11 @@ def _resolve_existing_path(value: str, base_directory: Path, field_name: str) ->
 
 
 def _load_2d_array(path: Path) -> np.ndarray:
+    """Load one two-dimensional NumPy or TIFF mask array.
+
+    Pickled NumPy content is disabled, and unsupported formats or extra dimensions
+    fail before the array enters alignment or class-label validation.
+    """
     if path.suffix.lower() == ".npy":
         array = np.load(path, allow_pickle=False)
     elif path.suffix.lower() in {".tif", ".tiff"}:
@@ -60,7 +74,11 @@ def prepare_model_inputs(
     nucleus_labels: np.ndarray,
     max_nucleus_distance: float = 64.0,
 ) -> np.ndarray:
-    """Build normalized GFAP, nucleus-mask, and nucleus-proximity channels."""
+    """Build the three channel-first inputs consumed by the baseline model.
+
+    GFAP is percentile-normalized, Cellpose nucleus instances become a binary
+    mask, and Euclidean distance supplies a bounded proximity plane.
+    """
     gfap = get_channel(microscopy_image, gfap_channel)
     validate_nucleus_labels(nucleus_labels, gfap.shape)
     nucleus_mask = labels_to_binary_mask(nucleus_labels)
@@ -69,7 +87,11 @@ def prepare_model_inputs(
 
 
 class AstrocyteDataset(Dataset[dict[str, Any]]):
-    """Return aligned three-channel image patches and integer segmentation targets."""
+    """Provide aligned image patches and integer semantic-segmentation targets.
+
+    Manifest rows are filtered by split and annotation lifecycle state before
+    patch indexing. Full source images are cached one at a time during access.
+    """
 
     def __init__(
         self,
@@ -81,6 +103,7 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         augmentation: Augmentation | None = None,
         annotation_statuses: Collection[str] | None = TRAINABLE_ANNOTATION_STATUSES,
         manifest_base_directory: str | Path | None = None,
+        num_classes: int | None = None,
     ) -> None:
         """Validate files and index annotated patches for one data split.
 
@@ -114,6 +137,9 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         self.overlap = overlap
         self.max_nucleus_distance = max_nucleus_distance
         self.augmentation = augmentation
+        if num_classes is not None and num_classes < 2:
+            raise ValueError("num_classes must be at least 2 when provided")
+        self.num_classes = num_classes
         self._records: list[dict[str, Any]] = []
         self._cache_index: int | None = None
         self._cache_value: tuple[np.ndarray, np.ndarray] | None = None
@@ -139,6 +165,11 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
                 )
             if np.any(target < 0) or not np.equal(target, np.floor(target)).all():
                 raise ValueError(f"Annotation for {row['image_id']!r} must contain non-negative class integers")
+            if num_classes is not None and target.size and target.max() >= num_classes:
+                raise ValueError(
+                    f"Annotation for {row['image_id']!r} contains class {int(target.max())}, "
+                    f"but num_classes is {num_classes}"
+                )
             coordinates = generate_patch_coordinates(image_shape, patch_size, overlap)
             self._records.append(
                 {
@@ -157,10 +188,19 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         ]
 
     def __len__(self) -> int:
-        """Return the number of indexed patches."""
+        """Return the total number of patches across eligible manifest images.
+
+        The count is fixed during initialization from deterministic coordinate
+        grids. It may exceed the number of images by several orders of magnitude.
+        """
         return len(self._patch_index)
 
     def _load_record(self, record_index: int) -> tuple[np.ndarray, np.ndarray]:
+        """Load and cache complete model inputs and target for one image record.
+
+        Only the most recently accessed image remains cached, limiting memory while
+        avoiding repeated OME and mask reads for adjacent patches of that image.
+        """
         if self._cache_index == record_index and self._cache_value is not None:
             return self._cache_value
         record = self._records[record_index]
@@ -179,7 +219,11 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         return inputs, target
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        """Return one image patch, target patch, image ID, and coordinates."""
+        """Load and return one aligned segmentation patch by global index.
+
+        The result contains float32 ``image``, long ``target``, source ``image_id``,
+        and ``PatchCoordinates`` needed to reconstruct full-image predictions.
+        """
         record_index, coordinates = self._patch_index[index]
         inputs, target = self._load_record(record_index)
         image_patch = extract_patch(inputs, coordinates)

@@ -19,10 +19,13 @@ def predict_full_image(
     overlap: int,
     device: torch.device,
 ) -> np.ndarray:
-    """Predict and overlap-average a full ``[C, H, W]`` image."""
+    """Predict a full channel-first image using overlapping model patches.
+
+    Softmax probabilities—not hard labels—are averaged in overlap regions.
+    The returned ``[num_classes, H, W]`` array preserves the source dimensions.
+    """
     if inputs.ndim != 3:
         raise ValueError(f"inputs must have shape [C, H, W]; received {inputs.shape}")
     coordinates = generate_patch_coordinates(inputs.shape[-2:], patch_size, overlap)
     patches = [predict_patch(model, extract_patch(inputs, coord), device) for coord in coordinates]
     return stitch_probability_patches(patches, coordinates, inputs.shape[-2:])
-

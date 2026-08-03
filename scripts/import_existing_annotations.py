@@ -11,6 +11,11 @@ from astroseg.io import load_manifest, validate_manifest
 
 
 def _resolve_path(value: str, base_directory: Path, description: str) -> Path:
+    """Resolve an import-table path using project and table-relative locations.
+
+    The caller supplies a human-readable description so missing microscopy images
+    and missing annotation exports produce distinguishable errors.
+    """
     path = Path(value)
     for candidate in (path, base_directory / path):
         if candidate.is_file():
@@ -19,6 +24,11 @@ def _resolve_path(value: str, base_directory: Path, description: str) -> Path:
 
 
 def _portable_path(path: Path) -> str:
+    """Convert an imported artifact path to a portable manifest representation.
+
+    Files inside the working tree become relative forward-slash paths. External
+    files retain their supplied path because no safe project-relative form exists.
+    """
     try:
         return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
@@ -35,7 +45,11 @@ def import_pairs(
     default_annotator: str,
     overwrite: bool = False,
 ) -> pd.DataFrame:
-    """Import pair-table masks and write an updated manifest."""
+    """Import image-linked human masks and write a new lifecycle manifest.
+
+    Each pair is archived, binarized, overlaid for QC, and recorded with provenance.
+    Existing annotation states require explicit overwrite permission to advance.
+    """
     manifest = load_manifest(manifest_path)
     pairs = pd.read_csv(pairs_path, dtype=str, keep_default_na=False)
     required = {"image_id", "mask_path"}
@@ -83,7 +97,11 @@ def import_pairs(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse annotation pair-table, provenance, and destination arguments.
+
+    The output manifest is mandatory, while lifecycle state, source, annotator,
+    and overwrite policy may be supplied globally or overridden by pair columns.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--pairs-csv", type=Path, required=True)
@@ -97,7 +115,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Import annotations and report the updated manifest."""
+    """Run non-destructive annotation import and report its manifest destination.
+
+    The command writes no success summary until the complete pair table validates
+    and every imported artifact has been represented in the output manifest.
+    """
     args = parse_args()
     manifest = import_pairs(
         args.manifest,

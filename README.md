@@ -324,6 +324,11 @@ well level before patches are generated, so patches from one image cannot appear
 in different folds. Use `group_column: image_id` by default, or add an explicit
 non-empty `well_id` column and use `group_column: well_id`.
 
+Each cross-validation run also saves `cross_validation_assignments.csv` beside its
+checkpoints, recording the image/group, fold, and effective split used by that run.
+Evaluation reconstructs complete probability maps before calculating metrics, so
+pixels in overlapping patches are counted exactly once.
+
 ## Seed annotation and correction workflow
 
 The supported iterative workflow is:

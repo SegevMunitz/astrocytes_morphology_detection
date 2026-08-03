@@ -17,7 +17,11 @@ def assign_grouped_folds(
     fold_column: str = "fold",
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Assign each image/well group wholly to one deterministic fold."""
+    """Assign each image or well group wholly to one deterministic fold.
+
+    Groups are greedily distributed by image count to reduce fold imbalance while
+    preserving group integrity. The input table is copied and gains a fold column.
+    """
     validate_manifest(manifest)
     if n_splits < 2:
         raise ValueError("n_splits must be at least 2")
@@ -32,8 +36,20 @@ def assign_grouped_folds(
             f"Grouped cross-validation requires at least {n_splits} groups; found {len(unique_groups)}"
         )
     rng = np.random.default_rng(seed)
-    shuffled_groups = [unique_groups[index] for index in rng.permutation(len(unique_groups))]
-    group_to_fold = {group: index % n_splits for index, group in enumerate(shuffled_groups)}
+    tie_order = {
+        unique_groups[index]: rank
+        for rank, index in enumerate(rng.permutation(len(unique_groups)))
+    }
+    group_sizes = groups.value_counts().to_dict()
+    ordered_groups = sorted(
+        unique_groups, key=lambda group: (-group_sizes[group], tie_order[group])
+    )
+    fold_sizes = [0] * n_splits
+    group_to_fold: dict[str, int] = {}
+    for group in ordered_groups:
+        fold = int(np.argmin(fold_sizes))
+        group_to_fold[group] = fold
+        fold_sizes[fold] += int(group_sizes[group])
     result = manifest.copy()
     result[fold_column] = groups.map(group_to_fold).astype(int)
     return result
@@ -45,7 +61,11 @@ def split_grouped_fold(
     group_column: str = "image_id",
     fold_column: str = "fold",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return train/validation manifest frames and verify group disjointness."""
+    """Split one assigned fold into validation and all remaining folds into train.
+
+    Group membership is checked after splitting, and any image/well leakage causes
+    an error. Returned copies receive conventional ``train`` and ``val`` labels.
+    """
     if fold_column not in manifest.columns:
         raise ValueError(f"Fold column is missing: {fold_column!r}")
     if group_column not in manifest.columns:
@@ -74,7 +94,11 @@ def load_grouped_fold_manifests(
     seed: int = 42,
     annotation_statuses: Collection[str] = TRAINABLE_ANNOTATION_STATUSES,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load eligible annotations and return one leakage-free grouped split."""
+    """Load eligible annotations and construct one reproducible grouped split.
+
+    Test rows and non-trainable annotation states are excluded. Existing complete
+    fold assignments are reused; otherwise deterministic assignments are created.
+    """
     if isinstance(annotation_statuses, str):
         raise TypeError("annotation_statuses must be a collection of states, not one string")
     manifest = load_manifest(manifest_path)

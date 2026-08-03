@@ -9,6 +9,11 @@ import numpy as np
 
 
 def _save_preview(image: np.ndarray, output_path: str | Path, cmap: str, title: str) -> None:
+    """Render one validated two-dimensional array with a titled color map.
+
+    The non-interactive backend writes a compact PNG and closes its figure promptly,
+    allowing batch preprocessing without accumulating GUI or figure resources.
+    """
     if image.ndim != 2:
         raise ValueError("preview image must be 2D")
     destination = Path(output_path)
@@ -23,22 +28,51 @@ def _save_preview(image: np.ndarray, output_path: str | Path, cmap: str, title: 
 
 
 def save_gfap_preview(image: np.ndarray, output_path: str | Path) -> None:
-    """Save a grayscale GFAP preview."""
-    _save_preview(image, output_path, "gray", "GFAP")
+    """Save a consistently styled grayscale preview of the GFAP channel.
+
+    The function validates two-dimensional input, hides axes, and writes a titled
+    PNG suitable for quick channel-selection quality control.
+    """
+    save_grayscale_preview(image, output_path, "GFAP")
+
+
+def save_grayscale_preview(
+    image: np.ndarray, output_path: str | Path, title: str
+) -> None:
+    """Save any two-dimensional microscopy channel as a grayscale preview.
+
+    The explicit title distinguishes channels such as DAPI from GFAP while sharing
+    the same visualization behavior. No intensity values are changed on disk.
+    """
+    if not title.strip():
+        raise ValueError("Preview title must not be empty")
+    _save_preview(image, output_path, "gray", title)
 
 
 def save_nucleus_label_preview(labels: np.ndarray, output_path: str | Path) -> None:
-    """Save a categorical Cellpose nucleus-label preview."""
+    """Save a categorical preview of Cellpose nucleus instance identifiers.
+
+    A spectral visualization separates adjacent integer instances visually; the
+    colors are display-only and have no role in preprocessing or analysis.
+    """
     _save_preview(labels, output_path, "nipy_spectral", "Nucleus labels")
 
 
 def save_nucleus_mask_preview(mask: np.ndarray, output_path: str | Path) -> None:
-    """Save a binary nucleus-mask preview."""
+    """Save a grayscale preview of the derived binary nucleus mask.
+
+    The output helps verify that all positive Cellpose instances became foreground
+    and that the mask remains aligned with the microscopy field.
+    """
     _save_preview(mask, output_path, "gray", "Nucleus mask")
 
 
 def save_proximity_map_preview(proximity: np.ndarray, output_path: str | Path) -> None:
-    """Save a nucleus-proximity heat-map preview."""
+    """Save a heat-map preview of the nucleus-proximity model input.
+
+    The visualization should peak on nucleus pixels and decay with distance,
+    making unexpected empty or misaligned distance maps easy to detect.
+    """
     _save_preview(proximity, output_path, "magma", "Nucleus proximity")
 
 
@@ -51,7 +85,11 @@ def save_qc_montage(
     ground_truth: np.ndarray | None = None,
     prediction: np.ndarray | None = None,
 ) -> None:
-    """Save a compact montage of preprocessing and optional segmentation outputs."""
+    """Save a compact QC montage of aligned preprocessing and segmentation planes.
+
+    GFAP, nucleus labels, binary mask, and proximity are always shown; ground truth
+    and prediction panels are appended when provided. All arrays must share shape.
+    """
     arrays = [gfap, nucleus_labels, nucleus_mask, proximity_map]
     if any(array.ndim != 2 or array.shape != gfap.shape for array in arrays):
         raise ValueError("All QC inputs must be aligned 2D arrays")

@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 import yaml
+import pandas as pd
 from torch.utils.data import DataLoader
 
 from astroseg.datasets import AstrocyteDataset, RandomFlip, collate_segmentation_batch
@@ -21,7 +22,11 @@ from astroseg.training import (
 
 
 def load_configuration(path: Path) -> dict[str, Any]:
-    """Load a YAML mapping used for model training."""
+    """Load and structurally validate the YAML training configuration.
+
+    Required data, model, training, loss, and output sections must be mappings.
+    Detailed numeric and dataset validation occurs when their components are built.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"Configuration does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -35,9 +40,14 @@ def load_configuration(path: Path) -> dict[str, Any]:
 
 
 def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, float | int]]:
-    """Construct datasets, loaders, model, loss, optimizer loop, and checkpoints."""
+    """Construct and execute one complete configured segmentation training run.
+
+    The function applies annotation filtering, optional grouped folds, loaders,
+    U-Net/loss construction, checkpointing, and fold-assignment persistence.
+    """
     set_deterministic_seed(int(configuration.get("seed", 42)))
     data_config = configuration["data"]
+    model_config = configuration["model"]
     manifest_path = Path(data_config["manifest_path"])
     annotation_statuses = data_config.get(
         "train_annotation_statuses", sorted(TRAINABLE_ANNOTATION_STATUSES)
@@ -47,6 +57,7 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         "overlap": int(data_config["overlap"]),
         "max_nucleus_distance": float(data_config.get("max_nucleus_distance", 64.0)),
         "annotation_statuses": annotation_statuses,
+        "num_classes": int(model_config["num_classes"]),
     }
     cross_validation = configuration.get("cross_validation", {})
     if cross_validation.get("enabled", False):
@@ -65,6 +76,15 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         )
         validation_dataset = AstrocyteDataset(
             validation_manifest, split="val", augmentation=None, **common, **frame_common
+        )
+        output_directory = Path(configuration["output"]["directory"])
+        output_directory.mkdir(parents=True, exist_ok=True)
+        group_column = str(cross_validation.get("group_column", "image_id"))
+        fold_column = str(cross_validation.get("fold_column", "fold"))
+        assignments = pd.concat((train_manifest, validation_manifest), ignore_index=True)
+        assignment_columns = ["image_id", group_column, fold_column, "split"]
+        assignments.loc[:, list(dict.fromkeys(assignment_columns))].to_csv(
+            output_directory / "cross_validation_assignments.csv", index=False
         )
     else:
         train_dataset = AstrocyteDataset(
@@ -89,7 +109,6 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         num_workers=num_workers,
         collate_fn=collate_segmentation_batch,
     )
-    model_config = configuration["model"]
     model = build_model(
         model_config["architecture"],
         int(model_config["input_channels"]),
@@ -115,7 +134,11 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse normal training, fold override, and synthetic smoke-test options.
+
+    A configuration is required for real training, whereas smoke mode constructs
+    its own deterministic CPU example and accepts only a step count.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
@@ -125,7 +148,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run configured training or the synthetic overfit diagnostic."""
+    """Dispatch either configured model training or the overfit diagnostic.
+
+    A fold override enables cross-validation and updates the stored configuration,
+    ensuring checkpoints describe the actual validation fold that was executed.
+    """
     args = parse_args()
     if args.smoke_test:
         initial, final = run_overfit_smoke_test(steps=args.smoke_steps)

@@ -10,6 +10,11 @@ from astroseg.constants import MANIFEST_COLUMNS
 
 
 def _display_path(path: Path) -> str:
+    """Format a discovered image path for portable manifest storage.
+
+    Files under the working tree become relative POSIX-style paths, while external
+    discovery roots retain explicit paths because they cannot be made project local.
+    """
     try:
         return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
@@ -17,7 +22,11 @@ def _display_path(path: Path) -> str:
 
 
 def build_manifest(raw_directory: Path, output_path: Path) -> pd.DataFrame:
-    """Catalog TIFF files without inferring experimental metadata or channels."""
+    """Discover TIFF images and write a conservative manifest template.
+
+    Stable IDs derive from stems, with path hashes resolving duplicate stems.
+    Experimental metadata and channel identities remain empty for manual entry.
+    """
     if not raw_directory.is_dir():
         raise NotADirectoryError(f"Raw-data directory does not exist: {raw_directory}")
     files = sorted(
@@ -45,7 +54,11 @@ def build_manifest(raw_directory: Path, output_path: Path) -> pd.DataFrame:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Define and parse the manifest-builder command-line interface.
+
+    Both the raw discovery directory and destination CSV are required and returned
+    as ``Path`` objects. No filesystem work occurs during argument parsing.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -53,7 +66,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run manifest discovery."""
+    """Run TIFF discovery and report the number of generated manifest rows.
+
+    Validation errors propagate with context so an empty or incorrect raw-data
+    directory cannot produce a misleading empty catalog.
+    """
     args = parse_args()
     manifest = build_manifest(args.raw_dir, args.output)
     print(f"Wrote {len(manifest)} image rows to {args.output}")

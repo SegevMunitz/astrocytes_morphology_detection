@@ -10,7 +10,11 @@ from ome_types import from_xml
 
 @dataclass
 class MicroscopyImage:
-    """A microscopy image normalized to channel-first ``[C, H, W]`` layout."""
+    """A microscopy image with a safe channel-first representation.
+
+    The record retains original numeric values, explicit OME channel names,
+    optional lateral pixel size, and the source path used for traceability.
+    """
 
     image: np.ndarray
     channel_names: list[str]
@@ -19,7 +23,11 @@ class MicroscopyImage:
 
 
 def _normalize_axes(array: np.ndarray, axes: str, source: Path) -> np.ndarray:
-    """Convert a TIFF series with known axes to ``[C, H, W]``."""
+    """Convert a TIFF series with explicit axes to channel-first layout.
+
+    Singleton non-spatial planes may be removed, but non-singleton time or depth
+    axes are rejected so the loader never chooses a scientific plane implicitly.
+    """
     axes = axes.upper()
     if len(axes) != array.ndim or "Y" not in axes or "X" not in axes:
         raise ValueError(
@@ -58,7 +66,11 @@ def _normalize_axes(array: np.ndarray, axes: str, source: Path) -> np.ndarray:
 
 
 def _parse_ome_metadata(xml: str | None, channel_count: int) -> tuple[list[str], float | None]:
-    """Return channel names and lateral pixel size from OME XML when available."""
+    """Extract explicit channel names and lateral pixel size from OME XML.
+
+    Missing metadata yields empty channel names and no pixel size rather than
+    inferred identities. Metadata channel count must match the normalized array.
+    """
     names = [""] * channel_count
     pixel_size: float | None = None
     if not xml:
@@ -108,7 +120,11 @@ def load_ome_tiff(path: str | Path) -> MicroscopyImage:
 
 
 def get_channel(microscopy_image: MicroscopyImage, channel_name: str) -> np.ndarray:
-    """Select a channel by exact name, then by case-insensitive exact name."""
+    """Select one microscopy channel without fuzzy or positional guessing.
+
+    Exact metadata spelling is tried first, followed by a case-insensitive exact
+    match. Missing, duplicated, or ambiguous names produce informative errors.
+    """
     if not channel_name or not channel_name.strip():
         raise ValueError("channel_name must be a non-empty explicit channel name")
     exact = [i for i, name in enumerate(microscopy_image.channel_names) if name == channel_name]
@@ -127,4 +143,3 @@ def get_channel(microscopy_image: MicroscopyImage, channel_name: str) -> np.ndar
         raise ValueError(f"Case-insensitive channel name {channel_name!r} is ambiguous.")
     available = [name for name in microscopy_image.channel_names if name]
     raise KeyError(f"Channel {channel_name!r} was not found. Available named channels: {available}")
-

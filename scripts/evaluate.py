@@ -13,11 +13,16 @@ from astroseg.datasets import AstrocyteDataset, collate_segmentation_batch
 from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
 from astroseg.models import build_model
 from astroseg.training.checkpoints import load_checkpoint
-from astroseg.training.metrics import metrics_from_logits
+from astroseg.training.metrics import metrics_from_probability_patches
 from astroseg.training.cross_validation import load_grouped_fold_manifests
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load one evaluation configuration as a validated top-level mapping.
+
+    The helper preserves nested values for model and data construction and rejects
+    non-mapping YAML documents before checkpoint or dataset access.
+    """
     with path.open("r", encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
     if not isinstance(value, dict):
@@ -31,7 +36,11 @@ def evaluate_checkpoint(
     split: str,
     output_path: Path,
 ) -> pd.DataFrame:
-    """Evaluate patch predictions and average their metrics per source image."""
+    """Evaluate a checkpoint after reconstructing each complete source image.
+
+    Patch probabilities are averaged in overlaps before metrics are computed once
+    per pixel. The CSV contains per-image rows and an image-macro aggregate row.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_checkpoint(checkpoint_path, device)
     model_config = configuration["model"]
@@ -73,6 +82,7 @@ def evaluate_checkpoint(
         float(data_config.get("max_nucleus_distance", 64.0)),
         annotation_statuses=annotation_statuses,
         manifest_base_directory=manifest_base_directory,
+        num_classes=int(model_config["num_classes"]),
     )
     loader = DataLoader(
         dataset,
@@ -81,22 +91,39 @@ def evaluate_checkpoint(
         num_workers=int(data_config.get("num_workers", 0)),
         collate_fn=collate_segmentation_batch,
     )
-    records: list[dict[str, Any]] = []
+    patches_by_image: dict[str, dict[str, list[Any]]] = {}
     model.eval()
     with torch.inference_mode():
         for batch in loader:
-            logits = model(batch["image"].to(device))
+            probabilities = torch.softmax(model(batch["image"].to(device)), dim=1).cpu().numpy()
             for index, image_id in enumerate(batch["image_id"]):
-                values = metrics_from_logits(logits[index : index + 1], batch["target"][index : index + 1])
-                record: dict[str, Any] = {"image_id": image_id}
-                for class_index, class_values in values["per_class"].items():
-                    for name, value in class_values.items():
-                        record[f"class_{class_index}_{name}"] = value
-                for name, value in values["macro"].items():
-                    record[f"macro_{name}"] = value
-                records.append(record)
-    patch_frame = pd.DataFrame(records)
-    frame = patch_frame.groupby("image_id", as_index=False).mean(numeric_only=True)
+                collection = patches_by_image.setdefault(
+                    image_id, {"probabilities": [], "targets": [], "coordinates": []}
+                )
+                collection["probabilities"].append(probabilities[index])
+                collection["targets"].append(batch["target"][index].numpy())
+                collection["coordinates"].append(batch["coordinates"][index])
+    records: list[dict[str, Any]] = []
+    for image_id, collection in patches_by_image.items():
+        coordinates = collection["coordinates"]
+        image_shape = (
+            max(coordinate.y + coordinate.height for coordinate in coordinates),
+            max(coordinate.x + coordinate.width for coordinate in coordinates),
+        )
+        values = metrics_from_probability_patches(
+            collection["probabilities"],
+            collection["targets"],
+            coordinates,
+            image_shape,
+        )
+        record: dict[str, Any] = {"image_id": image_id}
+        for class_index, class_values in values["per_class"].items():
+            for name, value in class_values.items():
+                record[f"class_{class_index}_{name}"] = value
+        for name, value in values["macro"].items():
+            record[f"macro_{name}"] = value
+        records.append(record)
+    frame = pd.DataFrame(records)
     aggregate = {"image_id": "__aggregate__"}
     aggregate.update(frame.drop(columns="image_id").mean().to_dict())
     frame = pd.concat((frame, pd.DataFrame([aggregate])), ignore_index=True)
@@ -106,7 +133,11 @@ def evaluate_checkpoint(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse checkpoint-evaluation command-line options.
+
+    Configuration and checkpoint paths are required; split and output location
+    receive reproducible defaults suitable for validation evaluation.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -116,7 +147,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Evaluate and report the output table location."""
+    """Run configured evaluation and print a concise output summary.
+
+    The command reports the number of reconstructed image rows separately from
+    the final aggregate row saved in the metrics CSV.
+    """
     args = parse_args()
     frame = evaluate_checkpoint(_load_yaml(args.config), args.checkpoint, args.split, args.output)
     print(f"Wrote metrics for {len(frame) - 1} images plus aggregate to {args.output}")

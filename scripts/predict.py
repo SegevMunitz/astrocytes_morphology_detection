@@ -18,6 +18,11 @@ from astroseg.visualization import save_segmentation_overlay
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load prediction configuration from a top-level YAML mapping.
+
+    Model shape and patching settings are consumed from this mapping; invalid
+    document roots fail before loading a potentially incompatible checkpoint.
+    """
     with path.open("r", encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
     if not isinstance(value, dict):
@@ -26,6 +31,11 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
+    """Resolve a manifest file path with context-specific error reporting.
+
+    Both project-relative and manifest-relative layouts are supported, matching
+    the same path convention used by datasets and preprocessing scripts.
+    """
     path = Path(value)
     for candidate in (path, manifest_path.parent / path):
         if candidate.is_file():
@@ -34,6 +44,11 @@ def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
 
 
 def _load_labels(path: Path) -> np.ndarray:
+    """Load a nucleus instance-label image from NumPy or TIFF.
+
+    The shared input-preparation function later checks dimensions and label values,
+    keeping this helper limited to storage-format dispatch.
+    """
     return np.load(path, allow_pickle=False) if path.suffix.lower() == ".npy" else tifffile.imread(path)
 
 
@@ -43,7 +58,11 @@ def predict_split(
     split: str,
     output_directory: Path,
 ) -> int:
-    """Predict all full images in a split and write reusable outputs."""
+    """Predict every manifest image in one split at its original resolution.
+
+    The function writes class probabilities, hard TIFF masks, and GFAP overlays
+    to separate subdirectories and returns the number of processed images.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_checkpoint(checkpoint_path, device)
     model_config = configuration["model"]
@@ -97,7 +116,11 @@ def predict_split(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse model configuration, checkpoint, split, and output arguments.
+
+    Test prediction and the standard prediction output directory are defaults,
+    while configuration and checkpoint paths remain explicit requirements.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -107,7 +130,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run full-image inference."""
+    """Run split-level full-image inference and print a concise artifact summary.
+
+    Any source-image, channel, nucleus-mask, or checkpoint mismatch propagates
+    before the command claims successful completion.
+    """
     args = parse_args()
     count = predict_split(_load_yaml(args.config), args.checkpoint, args.split, args.output_dir)
     print(f"Saved full-image predictions for {count} images to {args.output_dir}")
@@ -115,4 +142,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

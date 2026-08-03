@@ -16,7 +16,11 @@ def save_checkpoint(
     validation_metric: float,
     configuration: dict[str, Any],
 ) -> None:
-    """Save model, optimizer, progress, metric, and complete configuration."""
+    """Persist all state required to inspect or resume a training run.
+
+    The checkpoint contains model and optimizer states, completed epoch, tracked
+    validation metric, and the complete configuration used to build the run.
+    """
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -32,7 +36,11 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
-    """Load and minimally validate a training checkpoint."""
+    """Load a checkpoint onto the requested device and validate its schema.
+
+    Missing files or required state fields produce explicit errors before model
+    restoration. The raw checkpoint mapping is returned to the caller.
+    """
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"Checkpoint does not exist: {source}")
@@ -42,4 +50,3 @@ def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
     if missing:
         raise ValueError(f"Checkpoint is missing required fields: {sorted(missing)}")
     return checkpoint
-

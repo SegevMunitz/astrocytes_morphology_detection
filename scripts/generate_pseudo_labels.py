@@ -19,6 +19,11 @@ from astroseg.training.checkpoints import load_checkpoint
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load pseudo-label model and data settings from a YAML mapping.
+
+    The configuration path must exist and its root must be a dictionary because
+    nested data and model sections are consumed without implicit defaults.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"Configuration does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -29,6 +34,11 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
+    """Resolve a manifest file reference and preserve context in failures.
+
+    Project-relative paths are preferred, with manifest-relative paths supported
+    for portable pair tables. The description distinguishes images from masks.
+    """
     path = Path(value)
     for candidate in (path, manifest_path.parent / path):
         if candidate.is_file():
@@ -37,6 +47,11 @@ def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
 
 
 def _portable_path(path: Path) -> str:
+    """Represent an output path relative to the project when possible.
+
+    Portable forward-slash paths are written to generated manifests; paths outside
+    the working tree remain explicit rather than being rewritten incorrectly.
+    """
     try:
         return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
@@ -44,6 +59,11 @@ def _portable_path(path: Path) -> str:
 
 
 def _load_labels(path: Path) -> np.ndarray:
+    """Load nucleus instance labels from NumPy or TIFF for model-input creation.
+
+    No binarization occurs here because ``prepare_model_inputs`` performs and
+    validates the shared conversion used during training and ordinary prediction.
+    """
     labels = np.load(path, allow_pickle=False) if path.suffix.lower() == ".npy" else tifffile.imread(path)
     return np.asarray(labels)
 
@@ -56,7 +76,11 @@ def generate_pseudo_labels(
     split: str | None = None,
     overwrite: bool = False,
 ) -> pd.DataFrame:
-    """Predict rows in state ``none`` and record their automatic artifacts as pseudo labels."""
+    """Generate automatic labels only for manifest rows in state ``none``.
+
+    Full-image probabilities, hard masks, and overlays remain under the automatic
+    output directory. A new manifest records ``pseudo`` provenance for later review.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_checkpoint(checkpoint_path, device)
     model_config = configuration["model"]
@@ -117,7 +141,11 @@ def generate_pseudo_labels(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse checkpoint, configuration, output, and optional split arguments.
+
+    A destination manifest is required to avoid silently replacing the input
+    catalog. Overwriting automatic files requires an explicit flag.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -129,7 +157,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Generate pseudo labels and report the updated manifest."""
+    """Run pseudo-label inference and summarize the resulting manifest states.
+
+    The printed count reflects all rows marked pseudo in the output manifest,
+    while detailed errors remain associated with their source image IDs.
+    """
     args = parse_args()
     manifest = generate_pseudo_labels(
         _load_yaml(args.config),
@@ -145,4 +177,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

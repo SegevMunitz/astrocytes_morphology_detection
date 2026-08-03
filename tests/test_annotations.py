@@ -104,6 +104,25 @@ def test_grouped_folds_keep_images_and_wells_together() -> None:
     assert set(training["image_id"]).isdisjoint(validation["image_id"])
 
 
+def test_grouped_folds_balance_unequal_well_sizes() -> None:
+    """Greedy fold assignment balances image counts without splitting wells.
+
+    Wells containing five, four, and one image can be divided into two folds
+    containing five images each while every well remains intact.
+    """
+    rows = []
+    for well_id, image_count in (("large", 5), ("medium", 4), ("small", 1)):
+        for image_index in range(image_count):
+            row = _manifest_row(f"{well_id}_{image_index}")
+            row["well_id"] = well_id
+            rows.append(row)
+    folded = assign_grouped_folds(
+        pd.DataFrame(rows), n_splits=2, group_column="well_id", seed=3
+    )
+    assert sorted(folded["fold"].value_counts().tolist()) == [5, 5]
+    assert (folded.groupby("well_id")["fold"].nunique() == 1).all()
+
+
 def test_uncertainty_selection_prefers_ambiguous_predictions(tmp_path: Path) -> None:
     """A near-50/50 binary prediction ranks above a confident prediction."""
     probability_directory = tmp_path / "probabilities"

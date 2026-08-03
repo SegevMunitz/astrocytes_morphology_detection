@@ -6,9 +6,18 @@ from torch.nn import functional as F
 
 
 class DoubleConv(nn.Module):
-    """Two padded convolution and ReLU blocks."""
+    """Apply two padded convolution and ReLU transformations.
+
+    Spatial dimensions remain unchanged, allowing outputs to participate in
+    encoder-decoder skip connections without manual cropping.
+    """
 
     def __init__(self, input_channels: int, output_channels: int) -> None:
+        """Configure two spatially padded convolutions for one feature level.
+
+        The first layer changes channel width and the second refines it, with an
+        in-place ReLU following each convolution to keep the baseline compact.
+        """
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(input_channels, output_channels, kernel_size=3, padding=1),
@@ -18,20 +27,37 @@ class DoubleConv(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Apply the convolution block."""
+        """Transform a four-dimensional feature tensor through both convolutions.
+
+        Batch and spatial dimensions are preserved; only the configured channel
+        count changes. Shape validation is delegated to PyTorch convolutions.
+        """
         return self.layers(inputs)
 
 
 class UpBlock(nn.Module):
-    """Upsample, concatenate an encoder skip, and refine."""
+    """Decode one U-Net resolution level using an encoder skip tensor.
+
+    Transposed convolution upsamples the decoder features, which are resized for
+    odd dimensions, concatenated with the skip, and refined by ``DoubleConv``.
+    """
 
     def __init__(self, input_channels: int, skip_channels: int, output_channels: int) -> None:
+        """Configure learned upsampling and skip-feature refinement.
+
+        Channel dimensions account for concatenating the upsampled decoder tensor
+        with the matching encoder tensor before the final double convolution.
+        """
         super().__init__()
         self.up = nn.ConvTranspose2d(input_channels, output_channels, kernel_size=2, stride=2)
         self.conv = DoubleConv(output_channels + skip_channels, output_channels)
 
     def forward(self, inputs: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        """Decode one level, interpolating safely for odd input dimensions."""
+        """Upsample decoder features and merge them with one encoder skip.
+
+        Bilinear interpolation resolves one-pixel mismatches caused by pooling
+        odd-sized inputs, ensuring that concatenation remains spatially safe.
+        """
         inputs = self.up(inputs)
         if inputs.shape[-2:] != skip.shape[-2:]:
             inputs = F.interpolate(inputs, size=skip.shape[-2:], mode="bilinear", align_corners=False)
@@ -39,9 +65,18 @@ class UpBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    """A compact U-Net that returns per-pixel class logits."""
+    """Compact two-dimensional U-Net for semantic microscopy segmentation.
+
+    Three encoder levels and mirrored skip-connected decoder levels produce
+    per-pixel logits. The network contains no fully connected classification head.
+    """
 
     def __init__(self, input_channels: int = 3, num_classes: int = 2, base_channels: int = 32) -> None:
+        """Build the complete encoder, bottleneck, decoder, and logit projection.
+
+        Input channels, output classes, and base feature width are configurable;
+        invalid non-positive widths or fewer than two classes are rejected.
+        """
         super().__init__()
         if input_channels <= 0 or num_classes < 2 or base_channels <= 0:
             raise ValueError("input_channels and base_channels must be positive; num_classes must be >= 2")
@@ -56,7 +91,11 @@ class UNet(nn.Module):
         self.output = nn.Conv2d(base_channels, num_classes, kernel_size=1)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Return logits with shape ``[B, num_classes, H, W]``."""
+        """Encode and decode a batch into full-resolution class logits.
+
+        Inputs must follow ``[B, C, H, W]`` and be at least eight pixels per
+        spatial axis. Output height and width match the original tensor.
+        """
         if inputs.ndim != 4:
             raise ValueError(f"UNet expects [B, C, H, W] input; received {tuple(inputs.shape)}")
         if min(inputs.shape[-2:]) < 8:
@@ -69,4 +108,3 @@ class UNet(nn.Module):
         decoded = self.decoder2(decoded, skip2)
         decoded = self.decoder1(decoded, skip1)
         return self.output(decoded)
-

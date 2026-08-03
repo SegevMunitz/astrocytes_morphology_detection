@@ -4,7 +4,11 @@ import numpy as np
 
 
 def validate_nucleus_labels(labels: np.ndarray, image_shape: tuple[int, int]) -> None:
-    """Validate a two-dimensional non-negative label image against an image shape."""
+    """Validate a Cellpose nucleus instance-label array against its source image.
+
+    Labels must be aligned, two-dimensional, finite, non-negative, and integer
+    valued. The function raises on invalid data and does not modify the array.
+    """
     if labels.ndim != 2:
         raise ValueError(f"Nucleus labels must be 2D; received shape {labels.shape}")
     if len(image_shape) != 2 or any(size <= 0 for size in image_shape):
@@ -22,7 +26,10 @@ def validate_nucleus_labels(labels: np.ndarray, image_shape: tuple[int, int]) ->
 
 
 def labels_to_binary_mask(labels: np.ndarray) -> np.ndarray:
-    """Convert non-negative Cellpose instance labels to a float32 binary mask."""
+    """Convert validated Cellpose instances into a binary nucleus plane.
+
+    Every positive instance identifier becomes one and background remains zero.
+    The output is float32 for direct stacking with other model input channels.
+    """
     validate_nucleus_labels(labels, labels.shape if labels.ndim == 2 else (1, 1))
     return (labels > 0).astype(np.float32)
-

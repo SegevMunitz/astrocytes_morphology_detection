@@ -8,7 +8,11 @@ from skimage.morphology import skeletonize
 
 
 def skeleton_statistics(mask: np.ndarray) -> dict[str, Any]:
-    """Measure skeleton pixels, branch points, and endpoints in a binary field."""
+    """Measure skeleton length, branch pixels, and endpoints in one field.
+
+    Length is a raw skeleton-pixel count, while topology is estimated from the
+    eight-neighborhood of each skeleton pixel. Values are preliminary and unscaled.
+    """
     if mask.ndim != 2:
         raise ValueError("mask must be 2D")
     skeleton = skeletonize(mask.astype(bool))
@@ -20,4 +24,3 @@ def skeleton_statistics(mask: np.ndarray) -> dict[str, Any]:
         "branch_point_count": int(np.logical_and(skeleton, neighbor_count >= 3).sum()),
         "endpoint_count": int(np.logical_and(skeleton, neighbor_count == 1).sum()),
     }
-

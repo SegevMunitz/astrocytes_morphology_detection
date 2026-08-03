@@ -21,6 +21,11 @@ from astroseg.visualization import (
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
+    """Resolve an image or mask path while retaining a descriptive error label.
+
+    Direct project-relative and manifest-relative candidates are supported.
+    Missing paths raise before any derived nucleus artifacts are written.
+    """
     path = Path(value)
     for candidate in (path, manifest_path.parent / path):
         if candidate.is_file():
@@ -29,6 +34,11 @@ def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
 
 
 def _load_labels(path: Path) -> np.ndarray:
+    """Load a Cellpose label array from NumPy or TIFF storage.
+
+    The array is returned unchanged for shared structural validation; unsupported
+    formats naturally fail instead of being interpreted through filename guessing.
+    """
     labels = np.load(path, allow_pickle=False) if path.suffix.lower() == ".npy" else tifffile.imread(path)
     return np.asarray(labels)
 
@@ -38,7 +48,11 @@ def generate_nucleus_inputs(
     output_directory: Path,
     max_distance: float = 64.0,
 ) -> int:
-    """Generate and save model-ready nucleus inputs for all manifest rows."""
+    """Generate binary nucleus and proximity inputs for every manifest image.
+
+    Cellpose labels are shape-validated against OME dimensions before NumPy arrays,
+    individual previews, and an optional GFAP-aligned QC montage are written.
+    """
     manifest = load_manifest(manifest_path)
     mask_directory = output_directory / "nucleus_masks"
     distance_directory = output_directory / "nucleus_distance_maps"
@@ -73,7 +87,11 @@ def generate_nucleus_inputs(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse nucleus-input generation paths and distance cutoff.
+
+    Manifest and output directory are required, while maximum distance defaults
+    to the same 64-pixel value used by the baseline data configuration.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -82,7 +100,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Generate nucleus-derived inputs."""
+    """Generate all nucleus-derived artifacts and report the image count.
+
+    Errors identify missing masks or shape mismatches, so the printed completion
+    summary is emitted only after every selected manifest row succeeds.
+    """
     args = parse_args()
     count = generate_nucleus_inputs(args.manifest, args.output_dir, args.max_distance)
     print(f"Generated nucleus inputs for {count} images in {args.output_dir}")
@@ -90,4 +112,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

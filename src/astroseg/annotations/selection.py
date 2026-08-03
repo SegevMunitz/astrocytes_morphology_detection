@@ -20,7 +20,11 @@ def select_uncertain_patches(
     annotation_statuses: Collection[str] = ("none", "pseudo"),
     max_patches_per_image: int | None = None,
 ) -> pd.DataFrame:
-    """Rank unreviewed patches by mean normalized predictive entropy."""
+    """Rank unreviewed patches by mean normalized predictive entropy.
+
+    Probability maps are read per eligible manifest row and divided using the
+    standard patch grid. The returned table is sorted from most to least uncertain.
+    """
     validate_manifest(manifest)
     if top_k <= 0:
         raise ValueError("top_k must be positive")
@@ -82,4 +86,3 @@ def select_uncertain_patches(
         )
     )
     return pd.DataFrame(records[:top_k])
-

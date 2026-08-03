@@ -9,7 +9,11 @@ from astroseg.constants import ANNOTATION_STATUSES, MANIFEST_COLUMNS, VALID_SPLI
 
 
 class ManifestRow(BaseModel):
-    """Serializable schema for a microscopy manifest row."""
+    """Typed schema for one microscopy image and its annotation lifecycle.
+
+    Core columns are declared explicitly while additional experimental metadata,
+    such as well identifiers, remains allowed for grouping and downstream analysis.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -31,7 +35,11 @@ class ManifestRow(BaseModel):
 
 
 def validate_manifest(manifest: pd.DataFrame) -> None:
-    """Validate required columns, identifiers, paths, splits, and annotation states."""
+    """Validate the structural and lifecycle contract of a manifest table.
+
+    The check covers required columns, unique image IDs, primary image paths,
+    split values, annotation states, and required paths for annotated rows.
+    """
     missing = [column for column in MANIFEST_COLUMNS if column not in manifest.columns]
     if missing:
         raise ValueError(f"Manifest is missing required columns: {missing}")
@@ -63,7 +71,11 @@ def validate_manifest(manifest: pd.DataFrame) -> None:
 
 
 def load_manifest(path: str | Path) -> pd.DataFrame:
-    """Load a CSV manifest as strings and validate its required schema."""
+    """Load and validate a manifest CSV without coercing metadata types.
+
+    Empty fields remain empty strings, while split and annotation status values
+    are normalized to lowercase. Invalid schemas fail before downstream I/O.
+    """
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"Manifest does not exist: {source}")

@@ -6,7 +6,11 @@ from skimage.measure import label, regionprops_table
 
 
 def component_morphology(mask: np.ndarray) -> pd.DataFrame:
-    """Return a preliminary connected-component morphology table."""
+    """Build a preliminary morphology table for binary connected components.
+
+    Each foreground component becomes one row containing area, bounding-box
+    coordinates, and eccentricity. Components are not assigned to individual cells.
+    """
     if mask.ndim != 2:
         raise ValueError("mask must be 2D")
     properties = regionprops_table(
@@ -14,4 +18,3 @@ def component_morphology(mask: np.ndarray) -> pd.DataFrame:
         properties=("label", "area", "bbox", "eccentricity"),
     )
     return pd.DataFrame(properties)
-

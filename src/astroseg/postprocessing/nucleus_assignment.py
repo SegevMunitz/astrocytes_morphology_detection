@@ -20,12 +20,12 @@ def assign_components_to_nuclei(mask: np.ndarray, nucleus_labels: np.ndarray) ->
         return output
     _, indices = distance_transform_edt(nucleus_labels == 0, return_indices=True)
     nearest_labels = nucleus_labels[tuple(indices)]
-    for component_index in range(1, int(label(mask.astype(bool)).max()) + 1):
-        component = label(mask.astype(bool)) == component_index
+    components = label(mask.astype(bool))
+    for component_index in range(1, int(components.max()) + 1):
+        component = components == component_index
         candidate = nearest_labels[component]
         candidate = candidate[candidate > 0]
         if candidate.size:
             values, counts = np.unique(candidate, return_counts=True)
             output[component] = int(values[np.argmax(counts)])
     return output
-

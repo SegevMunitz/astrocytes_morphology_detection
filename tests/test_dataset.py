@@ -115,3 +115,31 @@ def test_nucleus_validation_binary_mask_and_proximity() -> None:
 def test_proximity_without_nuclei_is_zero() -> None:
     """An empty nucleus mask has zero proximity everywhere."""
     assert not create_nucleus_proximity_map(np.zeros((5, 6), dtype=np.uint8)).any()
+
+
+def test_dataset_rejects_target_class_outside_model_range(tmp_path: Path) -> None:
+    """Invalid class indices fail during dataset validation, before training.
+
+    A binary model accepts only targets zero and one; detecting class two here
+    produces a clearer error than waiting for cross-entropy inside an epoch.
+    """
+    manifest_path = _write_dataset_files(tmp_path)
+    manifest = pd.read_csv(manifest_path, dtype=str, keep_default_na=False)
+    annotation_path = Path(manifest.loc[0, "annotation_path"])
+    annotation = tifffile.imread(annotation_path)
+    annotation[0, 0] = 2
+    tifffile.imwrite(annotation_path, annotation)
+    with pytest.raises(ValueError, match="num_classes is 2"):
+        AstrocyteDataset(
+            manifest_path, "train", patch_size=16, overlap=4, num_classes=2
+        )
+
+
+def test_proximity_rejects_non_binary_mask() -> None:
+    """Distance-map generation does not silently reinterpret invalid masks.
+
+    The model input contract requires zero/one nucleus masks; instance labels
+    must first pass through ``labels_to_binary_mask`` explicitly.
+    """
+    with pytest.raises(ValueError, match="binary"):
+        create_nucleus_proximity_map(np.array([[0, 2]], dtype=np.uint8))

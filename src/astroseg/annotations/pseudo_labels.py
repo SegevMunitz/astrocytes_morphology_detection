@@ -11,7 +11,11 @@ from astroseg.visualization.overlays import save_segmentation_overlay
 
 @dataclass(frozen=True)
 class PseudoLabelArtifacts:
-    """Automatic probability, mask, and QC paths for one image."""
+    """Paths created for one automatically pseudo-labeled image.
+
+    The record separates the full probability tensor, hard binary TIFF mask,
+    and visual QC overlay so no automatic file is confused with human annotation.
+    """
 
     probability_path: Path
     mask_path: Path
@@ -25,7 +29,11 @@ def save_pseudo_label_artifacts(
     output_directory: str | Path,
     overwrite: bool = False,
 ) -> PseudoLabelArtifacts:
-    """Save automatic probabilities and masks separately from human annotations."""
+    """Save automatic probabilities, a binary mask, and a QC overlay.
+
+    Inputs must contain two normalized class-probability planes aligned with the
+    GFAP image. Existing artifacts are protected unless overwrite is explicit.
+    """
     if not image_id.strip():
         raise ValueError("image_id must not be empty")
     if probabilities.ndim != 3 or probabilities.shape[0] != 2:
@@ -50,4 +58,3 @@ def save_pseudo_label_artifacts(
     tifffile.imwrite(mask_path, mask)
     save_segmentation_overlay(gfap_image, mask > 0, overlay_path, title="Pseudo-label overlay")
     return PseudoLabelArtifacts(probability_path, mask_path, overlay_path)
-

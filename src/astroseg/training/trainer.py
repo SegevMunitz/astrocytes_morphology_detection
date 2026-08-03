@@ -19,7 +19,11 @@ from astroseg.training.metrics import metrics_from_logits
 
 
 def set_deterministic_seed(seed: int) -> None:
-    """Seed Python, NumPy, and PyTorch and request deterministic algorithms."""
+    """Seed Python, NumPy, and PyTorch for reproducible baseline experiments.
+
+    CUDA generators are seeded when available, and deterministic algorithms are
+    requested in warning mode so unsupported operations remain visible.
+    """
     if seed < 0:
         raise ValueError("seed must be non-negative")
     random.seed(seed)
@@ -38,6 +42,11 @@ def _run_epoch(
     optimizer: AdamW | None,
     description: str,
 ) -> tuple[float, float]:
+    """Execute the shared batch loop for either training or validation.
+
+    Supplying an optimizer enables gradients and parameter updates; ``None`` uses
+    evaluation mode. Mean batch loss and foreground Dice are returned.
+    """
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
@@ -73,7 +82,11 @@ def train_epoch(
     optimizer: AdamW,
     device: torch.device,
 ) -> tuple[float, float]:
-    """Run one optimization epoch and return mean loss and foreground Dice."""
+    """Run one training epoch with gradient updates over every loader batch.
+
+    The function moves tensors to the selected device, backpropagates the loss,
+    updates AdamW, and returns mean batch loss and foreground macro Dice.
+    """
     return _run_epoch(model, data_loader, criterion, device, optimizer, "train")
 
 
@@ -83,7 +96,11 @@ def validation_epoch(
     criterion: nn.Module,
     device: torch.device,
 ) -> tuple[float, float]:
-    """Run one validation epoch and return mean loss and foreground Dice."""
+    """Evaluate one loader epoch without gradients or optimizer updates.
+
+    The model enters evaluation mode and returns mean batch loss together with
+    foreground macro Dice for checkpoint selection and early stopping.
+    """
     return _run_epoch(model, data_loader, criterion, device, None, "val")
 
 
@@ -96,7 +113,11 @@ def train_model(
     output_directory: str | Path,
     device: torch.device,
 ) -> list[dict[str, float | int]]:
-    """Train with AdamW, early stopping, CSV history, and reproducible checkpoints."""
+    """Train a segmentation model with AdamW and validation-based early stopping.
+
+    Best and latest checkpoints include complete configuration and optimizer state,
+    while a CSV history records loss and Dice values for every completed epoch.
+    """
     training_config = configuration["training"]
     optimizer = AdamW(
         model.parameters(),
@@ -139,7 +160,11 @@ def train_model(
 
 
 def run_overfit_smoke_test(seed: int = 42, steps: int = 25) -> tuple[float, float]:
-    """Overfit one synthetic patch on CPU and return initial and final loss."""
+    """Run a CPU diagnostic that overfits one deterministic synthetic patch.
+
+    This checks the model, loss, backward pass, and optimizer plumbing without
+    claiming scientific performance. Failure to reduce loss raises an error.
+    """
     if steps < 2:
         raise ValueError("steps must be at least 2")
     set_deterministic_seed(seed)

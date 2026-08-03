@@ -8,7 +8,11 @@ from astroseg.io import load_manifest
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse uncertainty-selection inputs, patch geometry, and ranking limits.
+
+    Multiple annotation states may be selected, and an optional per-image cap
+    prevents one uncertain field from consuming the entire correction queue.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--probability-dir", type=Path, required=True)
@@ -22,7 +26,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Write the ranked annotation queue."""
+    """Rank eligible patches and write the resulting manual-correction queue.
+
+    Selection uses saved probability tensors rather than hard masks, and the
+    printed count reflects the final globally ranked CSV rows.
+    """
     args = parse_args()
     selection = select_uncertain_patches(
         load_manifest(args.manifest),

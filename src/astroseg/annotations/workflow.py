@@ -15,7 +15,11 @@ from astroseg.visualization.overlays import save_segmentation_overlay
 
 @dataclass(frozen=True)
 class AnnotationImportResult:
-    """Paths and provenance produced by one annotation import."""
+    """Artifacts and provenance produced by one annotation import.
+
+    The immutable record identifies the preserved source mask, derived binary
+    target, QC overlay, and lifecycle metadata written back to the manifest.
+    """
 
     image_id: str
     original_mask_path: Path
@@ -28,7 +32,11 @@ class AnnotationImportResult:
 
 
 def load_annotation_mask(path: str | Path) -> np.ndarray:
-    """Load a 2D annotation mask from NumPy or TIFF without modifying it."""
+    """Load a two-dimensional annotation mask without modifying its source.
+
+    NumPy and TIFF masks are supported, and their original numeric dtype is
+    retained. Shape and label semantics are validated by the import workflow.
+    """
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"Annotation mask does not exist: {source}")
@@ -65,6 +73,11 @@ def validate_annotation_alignment(microscopy_image: MicroscopyImage, mask: np.nd
 
 
 def _prepare_destination(path: Path, overwrite: bool) -> None:
+    """Validate overwrite policy and create the destination parent directory.
+
+    Existing artifacts are protected by default so annotation imports cannot
+    silently replace human work. No file content is written by this helper.
+    """
     if path.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing annotation artifact: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +95,11 @@ def import_annotation_pair(
     review_status: str = "",
     overwrite: bool = False,
 ) -> AnnotationImportResult:
-    """Preserve an original mask, export binary target, and save a QC overlay."""
+    """Import one human mask without overwriting the original export.
+
+    The function validates image alignment, archives the instance-valued mask by
+    content hash, derives a binary target, and writes a GFAP QC overlay.
+    """
     if not image_id.strip():
         raise ValueError("image_id must not be empty")
     status = annotation_status.strip().lower()
