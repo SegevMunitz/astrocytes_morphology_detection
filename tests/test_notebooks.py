@@ -8,6 +8,7 @@ import pytest
 
 NOTEBOOK_DIRECTORY = Path(__file__).resolve().parents[1] / "notebooks"
 EXPECTED_NOTEBOOKS = (
+    "00_run_pipeline.ipynb",
     "01_inspect_tiff_channels.ipynb",
     "02_visualize_nucleus_masks.ipynb",
     "03_create_initial_annotations.ipynb",

@@ -728,21 +728,30 @@ No research images are required for either check.
 
 ## Guided notebook workflow
 
-The notebooks are executable guides over the same tested modules and scripts used
-by the command-line workflow. They do not maintain a second implementation of the
-pipeline. Run them in numeric order:
+The notebooks call the same tested modules and scripts used by the command-line
+workflow; they do not maintain a second implementation of the pipeline.
+
+For routine operation, open `00_run_pipeline.ipynb`, review its **User settings**
+cell, and choose **Run All**. It runs automatic preparation and GFAP pseudo
+segmentation, summarizes outputs, and exposes guarded switches for later training,
+evaluation, and prediction. It does not require running notebooks 01–04 first.
+
+Notebooks 01–04 are the detailed learning, inspection, parameter-comparison, and
+troubleshooting path. Run those in order when learning the project or investigating
+one stage:
 
 | Notebook | Purpose | Safe stopping point |
 |---|---|---|
+| `00_run_pipeline.ipynb` | Operational Run-All interface for manifest handling, preprocessing, nucleus detection, GFAP pseudo segmentation, QC, and optional trained-model stages. | Complete automatic result for the current data, or later model outputs when enabled. |
 | `01_inspect_tiff_channels.ipynb` | Discover/load the manifest, inspect TIFF metadata and channels, run automatic preparation, and display its report and QC montage. | Prepared channels, nucleus labels, proximity maps, and manifest. |
 | `02_visualize_nucleus_masks.ipynb` | Validate label alignment, visualize nucleus boundaries, inspect instance sizes, and optionally compare detector parameters without overwriting files. | Accepted nucleus QC. |
 | `03_create_initial_annotations.ipynb` | Generate automatic GFAP bootstrap pseudo labels, inspect masks/confidence/overlays, compare thresholds, and optionally import a human-corrected mask. | Automatic `pseudo` mask, or an imported `corrected` target. |
 | `04_evaluate_baseline.ipynb` | Audit training readiness, inspect the U-Net contract, run the synthetic smoke test, and optionally train, evaluate, and predict. | Smoke-test success until enough human-validated images exist. |
 
 Only edit cells labeled **User settings**. Expensive or scientifically gated steps
-use explicit Boolean switches such as `RUN_REAL_TRAINING`; executing all cells with
-their defaults is safe for the current single test image. Automatic predictions
-remain `pseudo` and are not converted into trusted training targets by a notebook.
+use explicit Boolean switches such as `RUN_TRAINING`; executing all cells with their
+defaults is safe for the current single test image. Automatic predictions remain
+`pseudo` and are not converted into trusted training targets by a notebook.
 
 The second notebook replaced the historical
 `02_visualize_cellpose_masks.ipynb` name. The active manifest column remains
