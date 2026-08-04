@@ -5,8 +5,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tifffile
+from skimage.io import imsave
 
 from astroseg.io.ome_tiff import MicroscopyImage, get_channel, load_ome_tiff
+from scripts.build_manifest import build_manifest
 
 
 def test_load_ome_tiff_channel_first_and_metadata(tmp_path: Path) -> None:
@@ -60,6 +62,49 @@ def test_load_non_ome_rgb_assigns_sample_names(tmp_path: Path) -> None:
     assert loaded.channel_names == ["Red", "Green", "Blue"]
     np.testing.assert_array_equal(get_channel(loaded, "Green"), array[..., 1])
     np.testing.assert_array_equal(get_channel(loaded, "blue"), array[..., 2])
+
+
+def test_load_rgb_bmp_assigns_color_channels(tmp_path: Path) -> None:
+    """RGB BMP input should use the same channel contract as an RGB TIFF.
+
+    BMP metadata has no biological names, so explicit color names remain the
+    stable basis for automatic GFAP/DAPI selection.
+    """
+    path = tmp_path / "ctrl_437.bmp"
+    array = np.zeros((13, 11, 3), dtype=np.uint8)
+    array[..., 0] = 9
+    array[..., 1] = 41
+    array[..., 2] = 83
+    imsave(path, array, check_contrast=False)
+
+    loaded = load_ome_tiff(path)
+
+    assert loaded.image.shape == (3, 13, 11)
+    assert loaded.channel_names == ["Red", "Green", "Blue"]
+    assert loaded.pixel_size_um is None
+    np.testing.assert_array_equal(get_channel(loaded, "Red"), array[..., 0])
+    np.testing.assert_array_equal(get_channel(loaded, "Blue"), array[..., 2])
+
+
+def test_manifest_discovers_bmp_tif_and_tiff_images(tmp_path: Path) -> None:
+    """Dataset discovery should treat every supported microscopy suffix equally.
+
+    Train/test assignment remains manifest metadata and is independent of format.
+    """
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    imsave(raw / "ctrl_437.bmp", np.zeros((5, 6, 3), dtype=np.uint8), check_contrast=False)
+    tifffile.imwrite(raw / "72h_407.tif", np.zeros((5, 6), dtype=np.uint8))
+    tifffile.imwrite(raw / "other.tiff", np.zeros((5, 6), dtype=np.uint8))
+
+    manifest = build_manifest(raw, tmp_path / "manifest.csv")
+
+    assert set(manifest["image_id"]) == {"ctrl_437", "72h_407", "other"}
+    assert {Path(value).suffix.lower() for value in manifest["path"]} == {
+        ".bmp",
+        ".tif",
+        ".tiff",
+    }
 
 
 def test_load_rejects_non_singleton_depth(tmp_path: Path) -> None:

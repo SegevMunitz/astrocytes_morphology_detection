@@ -21,6 +21,7 @@ MANIFEST_COLUMNS = [
 ]
 
 VALID_SPLITS = {"", "train", "val", "test"}
+MICROSCOPY_IMAGE_SUFFIXES = frozenset({".bmp", ".tif", ".tiff"})
 ANNOTATION_STATUSES = {"none", "seed", "pseudo", "corrected", "reviewed"}
 TRAINABLE_ANNOTATION_STATUSES = frozenset({"seed", "corrected", "reviewed"})
 HUMAN_ANNOTATION_STATUSES = frozenset({"seed", "corrected", "reviewed"})

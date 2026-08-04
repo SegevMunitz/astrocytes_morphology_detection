@@ -1,4 +1,4 @@
-"""Discover microscopy TIFFs and create an explicit manifest template."""
+"""Discover microscopy TIFF/BMP images and create a manifest template."""
 
 import argparse
 import hashlib
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from astroseg.constants import MANIFEST_COLUMNS
+from astroseg.constants import MANIFEST_COLUMNS, MICROSCOPY_IMAGE_SUFFIXES
 
 
 def _display_path(path: Path) -> str:
@@ -22,7 +22,7 @@ def _display_path(path: Path) -> str:
 
 
 def build_manifest(raw_directory: Path, output_path: Path) -> pd.DataFrame:
-    """Discover TIFF images and write a conservative manifest template.
+    """Discover TIFF/BMP images and write a conservative manifest template.
 
     Stable IDs derive from stems, with path hashes resolving duplicate stems.
     Experimental metadata and channel identities remain empty for manual entry.
@@ -30,10 +30,12 @@ def build_manifest(raw_directory: Path, output_path: Path) -> pd.DataFrame:
     if not raw_directory.is_dir():
         raise NotADirectoryError(f"Raw-data directory does not exist: {raw_directory}")
     files = sorted(
-        path for path in raw_directory.rglob("*") if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        path
+        for path in raw_directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in MICROSCOPY_IMAGE_SUFFIXES
     )
     if not files:
-        raise FileNotFoundError(f"No .tif or .tiff files were found under {raw_directory}")
+        raise FileNotFoundError(f"No .bmp, .tif, or .tiff files were found under {raw_directory}")
     stem_counts: dict[str, int] = {}
     for path in files:
         stem_counts[path.stem] = stem_counts.get(path.stem, 0) + 1
@@ -66,7 +68,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run TIFF discovery and report the number of generated manifest rows.
+    """Run microscopy-image discovery and report generated manifest rows.
 
     Validation errors propagate with context so an empty or incorrect raw-data
     directory cannot produce a misleading empty catalog.

@@ -1,4 +1,4 @@
-"""Microscopy TIFF loading with explicit channel-axis handling."""
+"""Microscopy TIFF/BMP loading with explicit channel-axis handling."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 import tifffile
 from ome_types import from_xml
+from skimage.io import imread
+
+from astroseg.constants import MICROSCOPY_IMAGE_SUFFIXES
 
 
 @dataclass
@@ -95,16 +98,45 @@ def _parse_ome_metadata(xml: str | None, channel_count: int) -> tuple[list[str],
     return names, pixel_size
 
 
-def load_ome_tiff(path: str | Path) -> MicroscopyImage:
-    """Load one microscopy TIFF series without changing its numeric dtype.
+def _load_bitmap(source: Path) -> MicroscopyImage:
+    """Load a standard grayscale, RGB, or RGBA BMP as channel-first data.
+
+    BMP contains no OME channel names or physical pixel size. Color samples are
+    therefore exposed explicitly as Red, Green, Blue, and optional Alpha.
+    """
+    array = np.asarray(imread(source))
+    if array.ndim == 2:
+        image = array[np.newaxis, ...]
+        channel_names = ["Gray"]
+    elif array.ndim == 3 and array.shape[-1] in {3, 4}:
+        image = np.moveaxis(array, -1, 0)
+        channel_names = ["Red", "Green", "Blue"]
+        if image.shape[0] == 4:
+            channel_names.append("Alpha")
+    else:
+        raise ValueError(
+            f"BMP must be grayscale, RGB, or RGBA; received shape {array.shape} from {source}"
+        )
+    return MicroscopyImage(image, channel_names, None, source)
+
+
+def load_microscopy_image(path: str | Path) -> MicroscopyImage:
+    """Load one supported TIFF/OME-TIFF or BMP microscopy image.
 
     Singleton time and depth axes are removed. Non-singleton time/depth axes are
-    rejected because choosing a plane implicitly would be scientifically unsafe.
-    Standard non-OME RGB samples receive explicit Red, Green, and Blue names.
+    rejected for TIFF because choosing a plane implicitly would be unsafe. RGB
+    TIFF and BMP files receive explicit Red, Green, and Blue channel names.
     """
     source = Path(path)
     if not source.is_file():
-        raise FileNotFoundError(f"OME-TIFF does not exist: {source}")
+        raise FileNotFoundError(f"Microscopy image does not exist: {source}")
+    suffix = source.suffix.lower()
+    if suffix not in MICROSCOPY_IMAGE_SUFFIXES:
+        raise ValueError(
+            f"Unsupported microscopy format {source.suffix!r}; expected BMP, TIF, or TIFF"
+        )
+    if suffix == ".bmp":
+        return _load_bitmap(source)
     with tifffile.TiffFile(source) as tif:
         if not tif.series:
             raise ValueError(f"TIFF contains no image series: {source}")
@@ -128,6 +160,15 @@ def load_ome_tiff(path: str | Path) -> MicroscopyImage:
         pixel_size_um=pixel_size,
         source_path=source,
     )
+
+
+def load_ome_tiff(path: str | Path) -> MicroscopyImage:
+    """Load TIFF or BMP microscopy data through the backward-compatible API.
+
+    The historical name is retained so existing pipeline components and external
+    callers continue working while BMP inputs use the same validated data model.
+    """
+    return load_microscopy_image(path)
 
 
 def get_channel(microscopy_image: MicroscopyImage, channel_name: str) -> np.ndarray:

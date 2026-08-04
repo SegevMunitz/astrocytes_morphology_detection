@@ -36,15 +36,47 @@ def _portable_path(path: Path | None) -> str:
         return path.as_posix()
 
 
+def discover_cellpose_pairs(manifest: pd.DataFrame, directory: Path) -> pd.DataFrame:
+    """Match trusted Cellpose ``*_seg.npy`` files to manifest image IDs.
+
+    ``example_seg.npy`` maps to image ID ``example``. Ambiguous, unmatched, or
+    missing exports fail before any annotation artifact is written.
+    """
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Cellpose annotation directory does not exist: {directory}")
+    files = sorted(
+        path for path in directory.rglob("*")
+        if path.is_file() and path.name.lower().endswith("_seg.npy")
+    )
+    if not files:
+        raise ValueError(f"No *_seg.npy files were found under {directory}")
+    manifest_ids = set(manifest["image_id"].astype(str))
+    records: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for path in files:
+        image_id = path.name[:-len("_seg.npy")]
+        if image_id not in manifest_ids:
+            raise ValueError(
+                f"Cellpose file {path.name!r} maps to image_id {image_id!r}, "
+                "which is absent from the manifest"
+            )
+        if image_id in seen:
+            raise ValueError(f"Several Cellpose files map to image_id {image_id!r}")
+        seen.add(image_id)
+        records.append({"image_id": image_id, "instance_mask_path": str(path.resolve())})
+    return pd.DataFrame(records)
+
+
 def import_instance_pairs(
     manifest_path: Path,
-    pairs_path: Path,
+    pairs_path: Path | None,
     output_directory: Path,
     output_manifest: Path,
     default_status: str,
     default_source: str,
     default_annotator: str,
     overwrite: bool = False,
+    cellpose_directory: Path | None = None,
 ) -> pd.DataFrame:
     """Import all image/instance pairs and record authoritative training paths.
 
@@ -52,7 +84,15 @@ def import_instance_pairs(
     predictions are never copied into these columns by this workflow.
     """
     manifest = load_manifest(manifest_path)
-    pairs = pd.read_csv(pairs_path, dtype=str, keep_default_na=False)
+    if (pairs_path is None) == (cellpose_directory is None):
+        raise ValueError("Provide exactly one of pairs_path or cellpose_directory")
+    if pairs_path is not None:
+        pairs = pd.read_csv(pairs_path, dtype=str, keep_default_na=False)
+        pairs_base_directory = pairs_path.parent
+    else:
+        assert cellpose_directory is not None
+        pairs = discover_cellpose_pairs(manifest, cellpose_directory)
+        pairs_base_directory = Path.cwd()
     required = {"image_id", "instance_mask_path"}
     missing = required - set(pairs)
     if missing:
@@ -81,12 +121,12 @@ def import_instance_pairs(
                 str(row["cellpose_mask_path"]), manifest_path.parent, "Nucleus mask"
             ),
             _resolve_path(
-                str(pair["instance_mask_path"]), pairs_path.parent, "Instance annotation"
+                str(pair["instance_mask_path"]), pairs_base_directory, "Instance annotation"
             ),
             str(row["gfap_channel"]),
             output_directory,
             (
-                _resolve_path(compartment_value, pairs_path.parent, "Compartment annotation")
+                _resolve_path(compartment_value, pairs_base_directory, "Compartment annotation")
                 if compartment_value
                 else None
             ),
@@ -120,7 +160,13 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--pairs-csv", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pairs-csv", type=Path)
+    source.add_argument(
+        "--cellpose-dir",
+        type=Path,
+        help="Recursively import *_seg.npy files by matching their basename to image_id",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("data/annotations"))
     parser.add_argument("--output-manifest", type=Path, required=True)
     parser.add_argument("--status", choices=sorted(HUMAN_ANNOTATION_STATUSES), default="seed")
@@ -145,6 +191,7 @@ def main() -> None:
         args.source,
         args.annotator,
         args.overwrite,
+        args.cellpose_dir,
     )
     print(f"Wrote {len(manifest)} rows with complete-cell annotation metadata")
 

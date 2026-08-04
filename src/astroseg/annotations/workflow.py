@@ -34,14 +34,31 @@ class AnnotationImportResult:
 def load_annotation_mask(path: str | Path) -> np.ndarray:
     """Load a two-dimensional annotation mask without modifying its source.
 
-    NumPy and TIFF masks are supported, and their original numeric dtype is
-    retained. Shape and label semantics are validated by the import workflow.
+    Plain NumPy arrays, TIFF masks, and trusted Cellpose ``*_seg.npy`` exports are
+    supported. Cellpose dictionaries are unwrapped through their ``masks`` entry.
     """
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"Annotation mask does not exist: {source}")
     if source.suffix.lower() == ".npy":
-        mask = np.load(source, allow_pickle=False)
+        try:
+            mask = np.load(source, allow_pickle=False)
+        except ValueError as error:
+            if not source.name.lower().endswith("_seg.npy"):
+                raise ValueError(
+                    f"Object-based NumPy annotations must use the Cellpose *_seg.npy name: {source}"
+                ) from error
+            # Cellpose stores a Python dictionary in this format. Loading pickled
+            # content is restricted to the explicit Cellpose suffix; files must
+            # still come from a trusted local Cellpose export.
+            payload_array = np.load(source, allow_pickle=True)
+            try:
+                payload = payload_array.item()
+            except ValueError as item_error:
+                raise ValueError(f"Invalid Cellpose segmentation container: {source}") from item_error
+            if not isinstance(payload, dict) or "masks" not in payload:
+                raise ValueError(f"Cellpose segmentation does not contain a 'masks' entry: {source}")
+            mask = payload["masks"]
     elif source.suffix.lower() in {".tif", ".tiff"}:
         mask = tifffile.imread(source)
     else:

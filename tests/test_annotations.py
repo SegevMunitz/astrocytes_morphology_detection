@@ -9,12 +9,14 @@ import tifffile
 
 from astroseg.annotations import (
     import_annotation_pair,
+    load_annotation_mask,
     save_pseudo_label_artifacts,
     select_uncertain_patches,
 )
 from astroseg.constants import MANIFEST_COLUMNS
 from astroseg.io.manifest import validate_manifest
 from astroseg.training.cross_validation import assign_grouped_folds, split_grouped_fold
+from scripts.import_instance_annotations import discover_cellpose_pairs
 
 
 def _manifest_row(image_id: str, status: str = "seed") -> dict[str, str]:
@@ -62,6 +64,27 @@ def test_import_preserves_instance_mask_and_exports_binary_qc(tmp_path: Path) ->
     assert set(np.unique(tifffile.imread(result.binary_mask_path))) == {0, 1}
     assert result.qc_overlay_path.is_file()
     assert result.annotation_status == "seed"
+
+
+def test_cellpose_seg_npy_is_discovered_and_unwraps_masks(tmp_path: Path) -> None:
+    """Cellpose dictionary exports should map by basename and expose instance IDs.
+
+    The original ``*_seg.npy`` container remains untouched for provenance.
+    """
+    image_id = "BMP4_24h_20x_20240307_145"
+    mask = np.zeros((9, 11), dtype=np.uint16)
+    mask[2:6, 3:8] = 7
+    export_path = tmp_path / f"{image_id}_seg.npy"
+    np.save(export_path, {"masks": mask, "outlines": mask > 0}, allow_pickle=True)
+    original_bytes = export_path.read_bytes()
+
+    loaded = load_annotation_mask(export_path)
+    pairs = discover_cellpose_pairs(pd.DataFrame({"image_id": [image_id]}), tmp_path)
+
+    np.testing.assert_array_equal(loaded, mask)
+    assert pairs.iloc[0]["image_id"] == image_id
+    assert Path(pairs.iloc[0]["instance_mask_path"]) == export_path.resolve()
+    assert export_path.read_bytes() == original_bytes
 
 
 def test_import_rejects_dimension_mismatch_before_writing(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 # Astrocyte Instance Segmentation
 
-Pipeline for separating complete individual GFAP-positive astrocytes in TIFF and
-OME-TIFF microscopy images.
+Pipeline for separating complete individual GFAP-positive astrocytes in BMP, TIFF,
+and OME-TIFF microscopy images.
 
 The final output contains:
 
@@ -150,7 +150,20 @@ or run the repository's configured Python environment.
 
 ## Routine automatic run
 
-Place images under `data/raw/`, then run:
+Place `.bmp`, `.tif`, and `.tiff` images together under `data/raw/`. File format
+does not determine the split; `train`, `val`, and `test` are assigned in the
+manifest. RGB BMP and ordinary RGB TIFF inputs expose `Red`, `Green`, and `Blue`
+channels. OME-TIFF keeps its metadata channel names.
+
+Build the manifest when starting a new dataset:
+
+```powershell
+.\.python311\python.exe scripts\build_manifest.py `
+  --raw-dir data/raw `
+  --output data/metadata/manifest.csv
+```
+
+Then run:
 
 ```powershell
 .\.python311\python.exe scripts\prepare_dataset.py
@@ -181,6 +194,30 @@ contract is:
 - a different ID for every astrocyte;
 - every cell ID overlaps exactly one detected nucleus.
 
+Cellpose exports such as
+`BMP4_24h_20x_20240307_145_seg.npy` are supported directly. Put them under:
+
+```text
+data/manual_exports/
+```
+
+The basename before `_seg.npy` must equal the manifest `image_id`. The importer
+extracts Cellpose's internal `masks` array and preserves the complete original
+file. Because Cellpose uses a pickled NumPy dictionary, import only trusted files.
+
+Import every matching Cellpose export without preparing a CSV:
+
+```powershell
+.\.python311\python.exe scripts\import_instance_annotations.py `
+  --manifest data/metadata/manifest.csv `
+  --cellpose-dir data/manual_exports `
+  --output-manifest data/metadata/manifest_instances.csv `
+  --annotator Segev
+```
+
+For the example filename, the manifest must contain the image ID
+`BMP4_24h_20x_20240307_145`.
+
 An optional compartment mask may use:
 
 ```text
@@ -190,7 +227,8 @@ An optional compartment mask may use:
 3 = process
 ```
 
-Create a pair table such as:
+If filenames do not match the image IDs, or if compartment masks are also
+available, create a pair table instead:
 
 ```csv
 image_id,instance_mask_path,compartment_mask_path,annotation_status,annotator,review_status
@@ -319,7 +357,7 @@ annotations while keeping automatic and human data separate.
 .\.python311\python.exe -m pytest -q
 ```
 
-The tests cover TIFF loading, nucleus/GFAP preprocessing, patch alignment,
+The tests cover BMP/TIFF loading, nucleus/GFAP preprocessing, patch alignment,
 annotation preservation, grouped folds, instance targets, model heads, losses,
 ownership offsets, object metrics, notebooks, and dataset behavior.
 

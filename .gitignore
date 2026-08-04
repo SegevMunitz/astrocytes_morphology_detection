@@ -14,6 +14,7 @@ venv/
 
 # Scientific data and generated outputs (directory placeholders are retained)
 data/raw/*
+data/manual_exports/*
 data/interim/*/*
 data/annotations/*/*
 data/processed/*/*
