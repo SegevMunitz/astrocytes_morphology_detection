@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 from ome_types import from_xml
-from skimage.io import imread
+from PIL import Image
 
 from astroseg.constants import MICROSCOPY_IMAGE_SUFFIXES
 
@@ -104,7 +104,10 @@ def _load_bitmap(source: Path) -> MicroscopyImage:
     BMP contains no OME channel names or physical pixel size. Color samples are
     therefore exposed explicitly as Red, Green, Blue, and optional Alpha.
     """
-    array = np.asarray(imread(source))
+    # Pillow identifies the file from its header, so a valid BMP remains readable
+    # even when an acquisition/export tool gave it a misleading ``.tif`` suffix.
+    with Image.open(source) as bitmap:
+        array = np.asarray(bitmap).copy()
     if array.ndim == 2:
         image = array[np.newaxis, ...]
         channel_names = ["Gray"]
@@ -118,6 +121,25 @@ def _load_bitmap(source: Path) -> MicroscopyImage:
             f"BMP must be grayscale, RGB, or RGBA; received shape {array.shape} from {source}"
         )
     return MicroscopyImage(image, channel_names, None, source)
+
+
+def _detect_container(source: Path) -> str:
+    """Identify BMP versus TIFF from magic bytes instead of trusting the suffix.
+
+    Some microscopy exports keep a TIFF filename while writing BMP bytes. Content
+    detection makes these files usable while unsupported or corrupt data still
+    fail with a clear error before an image decoder is selected.
+    """
+    with source.open("rb") as handle:
+        signature = handle.read(4)
+    if signature[:2] == b"BM":
+        return "bmp"
+    if signature in {b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"}:
+        return "tiff"
+    raise ValueError(
+        f"Unsupported or corrupt microscopy image container in {source}; "
+        "expected BMP or TIFF bytes"
+    )
 
 
 def load_microscopy_image(path: str | Path) -> MicroscopyImage:
@@ -135,7 +157,7 @@ def load_microscopy_image(path: str | Path) -> MicroscopyImage:
         raise ValueError(
             f"Unsupported microscopy format {source.suffix!r}; expected BMP, TIF, or TIFF"
         )
-    if suffix == ".bmp":
+    if _detect_container(source) == "bmp":
         return _load_bitmap(source)
     with tifffile.TiffFile(source) as tif:
         if not tif.series:

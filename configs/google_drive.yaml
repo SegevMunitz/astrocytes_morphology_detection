@@ -1,0 +1,25 @@
+# Public identifiers only. Google credentials must never be stored in this file.
+root_folder:
+  id: 15FrdmbZGEWyB2mBgGv2hVpIlkcGQy6tE
+  url: https://drive.google.com/drive/folders/15FrdmbZGEWyB2mBgGv2hVpIlkcGQy6tE
+
+training_images:
+  id: 1e-hOwPZUzlIQ22bORogVHzpNC4Xzmveq
+  name: Astrocytes Training Photos
+  expected_files: 10
+
+training_masks:
+  id: 1OdBCJgQNeL0gI9lZzANta_NJ1spHG9YA
+  name: Astrocytes Final Masks
+  expected_files: 10
+
+test_images:
+  id: 1XOVU1CyEz1I4xP5yErGcwmDwxhZ1s3yA
+  name: Astrocytes Morphology Photos
+
+outputs:
+  id: 1DIc9pIYaP3zN0wYk4A2U8dPldOimhekf
+  name: Astroseg Outputs
+  url: https://drive.google.com/drive/folders/1DIc9pIYaP3zN0wYk4A2U8dPldOimhekf
+
+local_workspace: .astroseg_runtime

@@ -1,6 +1,10 @@
 """Model-input preprocessing helpers."""
 
-from astroseg.preprocessing.channels import ChannelSelection, select_model_channels
+from astroseg.preprocessing.channels import (
+    ChannelSelection,
+    prepare_dapi_for_detection,
+    select_model_channels,
+)
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
 from astroseg.preprocessing.gfap_detection import GfapBootstrapResult, detect_gfap_bootstrap_mask
 from astroseg.preprocessing.instance_targets import (
@@ -33,6 +37,7 @@ __all__ = [
     "build_astrocyte_instance_targets",
     "map_cells_to_nuclei",
     "percentile_normalize",
+    "prepare_dapi_for_detection",
     "select_model_channels",
     "stitch_probability_patches",
     "validate_nucleus_labels",

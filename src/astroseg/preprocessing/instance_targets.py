@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import ndimage as ndi
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
+from skimage.measure import regionprops
 
 from astroseg.constants import COMPARTMENT_CLASSES
 
@@ -43,32 +46,38 @@ def _validate_label_image(labels: np.ndarray, name: str) -> np.ndarray:
 def map_cells_to_nuclei(
     cell_instances: np.ndarray,
     nucleus_instances: np.ndarray,
+    max_distance: float = 64.0,
 ) -> dict[int, int]:
-    """Map every astrocyte instance to its unique overlapping nucleus.
+    """Assign nearby cell and nucleus centroids one-to-one.
 
-    The nucleus with the greatest pixel overlap is selected. A cell without a
-    nucleus or reuse of one nucleus by multiple cells fails because offset targets
-    would otherwise encode an ambiguous biological identity.
+    GFAP masks commonly surround rather than overlap the GFAP-negative nucleus.
+    Global linear assignment prevents nucleus reuse; cells without a credible
+    nearby nucleus remain valid segmentation targets but receive no ownership loss.
     """
     cells = _validate_label_image(cell_instances, "cell_instances")
     nuclei = _validate_label_image(nucleus_instances, "nucleus_instances")
     if cells.shape != nuclei.shape:
         raise ValueError("Cell and nucleus instance images must have identical dimensions")
-    mapping: dict[int, int] = {}
-    used_nuclei: set[int] = set()
-    for cell_id in np.unique(cells[cells > 0]):
-        candidates = nuclei[cells == cell_id]
-        candidates = candidates[candidates > 0]
-        if not candidates.size:
-            raise ValueError(f"Astrocyte instance {int(cell_id)} does not overlap a nucleus")
-        values, counts = np.unique(candidates, return_counts=True)
-        nucleus_id = int(values[np.argmax(counts)])
-        if nucleus_id in used_nuclei:
-            raise ValueError(f"Nucleus instance {nucleus_id} is assigned to multiple astrocytes")
-        mapping[int(cell_id)] = nucleus_id
-        used_nuclei.add(nucleus_id)
-    if not mapping:
+    if not np.isfinite(max_distance) or max_distance <= 0:
+        raise ValueError("max_distance must be a finite positive number")
+    cell_regions = regionprops(cells)
+    nucleus_regions = regionprops(nuclei)
+    if not cell_regions:
         raise ValueError("Cell instance annotation contains no astrocytes")
+    if not nucleus_regions:
+        raise ValueError("Nucleus instance image contains no nuclei")
+    distances = cdist(
+        np.asarray([region.centroid for region in cell_regions]),
+        np.asarray([region.centroid for region in nucleus_regions]),
+    )
+    cell_indices, nucleus_indices = linear_sum_assignment(distances)
+    mapping = {
+        int(cell_regions[cell_index].label): int(nucleus_regions[nucleus_index].label)
+        for cell_index, nucleus_index in zip(cell_indices, nucleus_indices, strict=True)
+        if distances[cell_index, nucleus_index] <= max_distance
+    }
+    if not mapping:
+        raise ValueError(f"No astrocyte lies within {max_distance:g} pixels of a nucleus")
     return mapping
 
 
@@ -99,6 +108,7 @@ def build_astrocyte_instance_targets(
     compartments: np.ndarray | None = None,
     soma_radius: float = 20.0,
     offset_scale: float = 256.0,
+    max_nucleus_distance: float = 64.0,
 ) -> AstrocyteInstanceTargets:
     """Build all supervision planes for the multi-head instance model.
 
@@ -115,7 +125,17 @@ def build_astrocyte_instance_targets(
         raise ValueError("soma_radius must be a finite positive number")
     if not np.isfinite(offset_scale) or offset_scale <= 0:
         raise ValueError("offset_scale must be a finite positive number")
-    mapping = map_cells_to_nuclei(cells, nuclei)
+    mapping = map_cells_to_nuclei(cells, nuclei, max_nucleus_distance)
+    nucleus_to_cell = np.zeros(int(nuclei.max()) + 1, dtype=np.int64)
+    for cell_id, nucleus_id in mapping.items():
+        nucleus_to_cell[nucleus_id] = cell_id
+    assigned_nucleus_cells = nucleus_to_cell[nuclei]
+    assignable_nuclei = (assigned_nucleus_cells > 0) & (
+        (cells == 0) | (cells == assigned_nucleus_cells)
+    )
+    expanded_cells = cells.copy()
+    expanded_cells[assignable_nuclei] = assigned_nucleus_cells[assignable_nuclei]
+    nucleus_support = np.where(assignable_nuclei, assigned_nucleus_cells, 0)
 
     if compartments is not None:
         semantic = _validate_label_image(compartments, "compartments")
@@ -124,38 +144,51 @@ def build_astrocyte_instance_targets(
         allowed = set(COMPARTMENT_CLASSES.values())
         if not set(np.unique(semantic)).issubset(allowed):
             raise ValueError(f"Compartment labels must be in {sorted(allowed)}")
-        if np.any((semantic > 0) & (cells == 0)):
+        if np.any((semantic > 0) & (expanded_cells == 0)):
             raise ValueError("Positive compartment pixels must belong to an astrocyte instance")
         semantic = semantic.astype(np.uint8, copy=False)
     else:
         semantic = np.zeros(cells.shape, dtype=np.uint8)
-        for cell_id, nucleus_id in mapping.items():
-            cell_mask = cells == cell_id
-            nucleus_mask = (nuclei == nucleus_id) & cell_mask
-            distance = ndi.distance_transform_edt(~nucleus_mask)
-            semantic[cell_mask] = COMPARTMENT_CLASSES["process"]
-            semantic[cell_mask & (distance <= soma_radius)] = COMPARTMENT_CLASSES["soma"]
-            semantic[nucleus_mask] = COMPARTMENT_CLASSES["nucleus"]
+        semantic[expanded_cells > 0] = COMPARTMENT_CLASSES["process"]
+        distance, nearest_indices = ndi.distance_transform_edt(
+            nucleus_support == 0, return_indices=True
+        )
+        nearest_cell = nucleus_support[tuple(nearest_indices)]
+        soma = (
+            (expanded_cells > 0)
+            & (expanded_cells == nearest_cell)
+            & (distance <= soma_radius)
+        )
+        semantic[soma] = COMPARTMENT_CLASSES["soma"]
+        semantic[nucleus_support > 0] = COMPARTMENT_CLASSES["nucleus"]
 
     offsets = np.zeros((2, *cells.shape), dtype=np.float32)
     yy, xx = np.indices(cells.shape, dtype=np.float32)
+    center_y = np.zeros(int(expanded_cells.max()) + 1, dtype=np.float32)
+    center_x = np.zeros_like(center_y)
     for cell_id, nucleus_id in mapping.items():
         nucleus_y, nucleus_x = np.nonzero(nuclei == nucleus_id)
-        center_y = float(nucleus_y.mean())
-        center_x = float(nucleus_x.mean())
-        cell_mask = cells == cell_id
-        # Preserve complete displacements even when a process is longer than the
-        # normalization scale. Clipping would erase the identity of long branches.
-        offsets[0, cell_mask] = (center_y - yy[cell_mask]) / offset_scale
-        offsets[1, cell_mask] = (center_x - xx[cell_mask]) / offset_scale
+        center_y[cell_id] = float(nucleus_y.mean())
+        center_x[cell_id] = float(nucleus_x.mean())
+    mapped_cell = np.zeros(len(center_y), dtype=bool)
+    mapped_cell[list(mapping)] = True
+    offset_pixels = mapped_cell[expanded_cells]
+    # Preserve complete displacements even when a process is longer than the
+    # normalization scale. Clipping would erase the identity of long branches.
+    offsets[0, offset_pixels] = (
+        center_y[expanded_cells[offset_pixels]] - yy[offset_pixels]
+    ) / offset_scale
+    offsets[1, offset_pixels] = (
+        center_x[expanded_cells[offset_pixels]] - xx[offset_pixels]
+    ) / offset_scale
 
-    boundary = _cell_contact_boundaries(cells)
-    offset_mask = (cells > 0).astype(np.float32)
+    boundary = _cell_contact_boundaries(expanded_cells)
+    offset_mask = offset_pixels.astype(np.float32)
     return AstrocyteInstanceTargets(
         semantic=semantic,
         boundary=boundary,
         offsets=offsets,
         offset_mask=offset_mask,
-        instances=cells.astype(np.uint32),
+        instances=expanded_cells.astype(np.uint32),
         cell_to_nucleus=mapping,
     )

@@ -47,6 +47,7 @@ def import_astrocyte_instance_pair(
     review_status: str = "",
     soma_radius: float = 20.0,
     offset_scale: float = 256.0,
+    max_nucleus_distance: float = 64.0,
     overwrite: bool = False,
 ) -> InstanceAnnotationImportResult:
     """Validate and archive one ownership-aware complete-cell annotation.
@@ -70,6 +71,7 @@ def import_astrocyte_instance_pair(
         compartments,
         soma_radius=soma_radius,
         offset_scale=offset_scale,
+        max_nucleus_distance=max_nucleus_distance,
     )
 
     destination = Path(output_directory)

@@ -52,6 +52,7 @@ def _eligible_instance_rows(
     manifest = load_manifest(manifest_path)
     selected = manifest["annotation_status"].isin(statuses)
     selected &= manifest["instance_annotation_path"].astype(str).str.strip() != ""
+    selected &= manifest["split"] != "test"
     result = manifest.loc[selected].copy()
     if result.empty:
         raise ValueError(

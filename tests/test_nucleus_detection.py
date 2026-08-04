@@ -6,7 +6,12 @@ import numpy as np
 from skimage.draw import disk
 
 from astroseg.io.ome_tiff import MicroscopyImage
-from astroseg.preprocessing import detect_nucleus_instances, select_model_channels
+from astroseg.preprocessing.channels import ChannelSelection
+from astroseg.preprocessing import (
+    detect_nucleus_instances,
+    prepare_dapi_for_detection,
+    select_model_channels,
+)
 
 
 def _rgb_image(red_value: int, green_value: int, tmp_path: Path) -> MicroscopyImage:
@@ -35,6 +40,28 @@ def test_manifest_channel_selection_takes_priority(tmp_path: Path) -> None:
     )
     assert selection.gfap_channel == "Green"
     assert selection.method == "manifest"
+
+
+def test_rgb_dapi_preparation_removes_gfap_color_mixing(tmp_path: Path) -> None:
+    """Pink/cyan GFAP signal in Blue should not become a false nucleus.
+
+    Correction is limited to generic RGB channel names; explicitly named
+    biological OME channels are passed through without numeric modification.
+    """
+    microscopy = _rgb_image(200, 10, tmp_path)
+    selection = select_model_channels(microscopy)
+    corrected, method = prepare_dapi_for_detection(
+        microscopy.image[2], microscopy.image[0], selection
+    )
+    assert method == "normalized_blue_minus_gfap"
+    assert corrected[12, 12] == 0
+
+    named = ChannelSelection("GFAP", "DAPI", "named_metadata")
+    unchanged, named_method = prepare_dapi_for_detection(
+        microscopy.image[2], microscopy.image[0], named
+    )
+    np.testing.assert_array_equal(unchanged, microscopy.image[2])
+    assert named_method == "native_dapi"
 
 
 def test_detect_nucleus_instances_separates_bright_objects() -> None:

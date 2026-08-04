@@ -17,6 +17,7 @@ from astroseg.training import (
     instance_segmentation_metrics,
     process_ownership_accuracy,
 )
+from scripts.train_instances import _eligible_instance_rows
 
 
 def _two_cell_labels() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -112,6 +113,33 @@ def test_instance_dataset_loads_aligned_complete_cell_targets(tmp_path: Path) ->
     assert item["instances"].dtype == torch.int64
 
 
+def test_instance_training_never_selects_reserved_test_images(tmp_path: Path) -> None:
+    """Human-labeled test rows must remain outside grouped model development.
+
+    Annotation availability cannot override an explicit held-out test assignment.
+    """
+    rows = []
+    for image_id, split in (("development", "train"), ("held_out", "test")):
+        row = {column: "" for column in MANIFEST_COLUMNS}
+        row.update(
+            {
+                "image_id": image_id,
+                "path": f"data/raw/{image_id}.tif",
+                "annotation_path": f"data/annotations/{image_id}_binary.tiff",
+                "instance_annotation_path": f"data/annotations/{image_id}_cells.tiff",
+                "annotation_status": "reviewed",
+                "split": split,
+            }
+        )
+        rows.append(row)
+    manifest_path = tmp_path / "manifest.csv"
+    pd.DataFrame(rows, columns=MANIFEST_COLUMNS).to_csv(manifest_path, index=False)
+
+    selected = _eligible_instance_rows(manifest_path, {"reviewed"})
+
+    assert selected["image_id"].tolist() == ["development"]
+
+
 def test_boundary_target_marks_only_contacts_between_different_cells() -> None:
     """Touching cell IDs are separated without labeling their outer GFAP edge.
 
@@ -127,6 +155,30 @@ def test_boundary_target_marks_only_contacts_between_different_cells() -> None:
     assert np.all(targets.boundary[2:6, 3:5] == 1)
     assert targets.boundary[2, 1] == 0
     assert targets.boundary[5, 6] == 0
+
+
+def test_instance_targets_assign_nearby_nonoverlapping_nuclei() -> None:
+    """A GFAP-negative nuclear hole must still anchor its astrocyte.
+
+    One distant cell remains useful for semantic and boundary supervision but is
+    excluded from ownership-offset loss because its nucleus identity is unknown.
+    """
+    cells = np.zeros((32, 32), dtype=np.uint16)
+    cells[5:13, 5:13] = 1
+    cells[24:29, 24:29] = 2
+    cells[8:10, 8:10] = 0
+    nuclei = np.zeros_like(cells)
+    nuclei[8:10, 8:10] = 7
+
+    targets = build_astrocyte_instance_targets(
+        cells, nuclei, soma_radius=3, max_nucleus_distance=8
+    )
+
+    assert targets.cell_to_nucleus == {1: 7}
+    assert np.all(targets.semantic[nuclei == 7] == 1)
+    assert np.all(targets.instances[nuclei == 7] == 1)
+    assert np.all(targets.offset_mask[cells == 2] == 0)
+    assert np.all(targets.semantic[cells == 2] == 3)
 
 
 def test_instance_model_and_loss_cover_all_three_heads() -> None:

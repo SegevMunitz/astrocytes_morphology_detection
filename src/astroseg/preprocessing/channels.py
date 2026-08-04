@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from astroseg.io.ome_tiff import MicroscopyImage, get_channel
+from astroseg.preprocessing.normalize import percentile_normalize
 
 
 @dataclass(frozen=True)
@@ -106,3 +107,27 @@ def select_model_channels(
         "Could not determine GFAP and DAPI channels automatically. "
         f"Available names: {microscopy_image.channel_names}"
     )
+
+
+def prepare_dapi_for_detection(
+    dapi: np.ndarray,
+    gfap: np.ndarray,
+    selection: ChannelSelection,
+) -> tuple[np.ndarray, str]:
+    """Suppress GFAP color mixing before detecting nuclei in RGB composites.
+
+    Pink/red or cyan renderings can place the structural marker in the Blue sample
+    as well as Red/Green. Subtracting normalized GFAP removes those processes;
+    biologically named OME channels retain their original numeric values.
+    """
+    if selection.dapi_channel.casefold() != "blue" or selection.gfap_channel.casefold() not in {
+        "red",
+        "green",
+    }:
+        return np.asarray(dapi), "native_dapi"
+    corrected = np.clip(
+        percentile_normalize(dapi) - percentile_normalize(gfap),
+        0.0,
+        1.0,
+    )
+    return corrected.astype(np.float32, copy=False), "normalized_blue_minus_gfap"

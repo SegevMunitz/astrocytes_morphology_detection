@@ -86,6 +86,26 @@ def test_load_rgb_bmp_assigns_color_channels(tmp_path: Path) -> None:
     np.testing.assert_array_equal(get_channel(loaded, "Blue"), array[..., 2])
 
 
+def test_load_bmp_content_with_tif_suffix(tmp_path: Path) -> None:
+    """A mislabeled Drive export should be decoded from its BMP signature.
+
+    Real test data contains BMP bytes under a ``.tif`` filename, so suffix-only
+    dispatch would incorrectly send it to the TIFF decoder.
+    """
+    bmp_path = tmp_path / "export.bmp"
+    misleading_path = tmp_path / "export.tif"
+    array = np.zeros((9, 7, 3), dtype=np.uint8)
+    array[..., 1] = 31
+    imsave(bmp_path, array, check_contrast=False)
+    bmp_path.rename(misleading_path)
+
+    loaded = load_ome_tiff(misleading_path)
+
+    assert loaded.image.shape == (3, 9, 7)
+    assert loaded.channel_names == ["Red", "Green", "Blue"]
+    np.testing.assert_array_equal(get_channel(loaded, "Green"), array[..., 1])
+
+
 def test_manifest_discovers_bmp_tif_and_tiff_images(tmp_path: Path) -> None:
     """Dataset discovery should treat every supported microscopy suffix equally.
 

@@ -1,138 +1,55 @@
 # Astrocyte Instance Segmentation
 
-Pipeline for separating complete individual GFAP-positive astrocytes in BMP, TIFF,
-and OME-TIFF microscopy images.
+This project separates complete individual GFAP-positive astrocytes in BMP, TIFF,
+and OME-TIFF microscopy images. Its goal is not only to find astrocyte signal, but
+to associate each nucleus, soma, and process with the correct cell.
 
-The final output contains:
+The final prediction contains:
 
 ```text
 instance labels:  0 = background, 1..N = individual astrocytes
 compartments:     0 = background, 1 = nucleus, 2 = soma, 3 = process
-ownership:        each astrocyte ID is linked to one nucleus ID
+ownership:        every predicted cell is linked to one nucleus
 ```
 
-The main challenge is not merely detecting GFAP signal, but assigning every soma
-and process to the correct cell. Nuclei are therefore used as cell-identity anchors.
+## Model overview
 
-## How the model works
+Every model input has three aligned channels: normalized GFAP intensity, a binary
+nucleus mask, and a nucleus-proximity map. A shared U-Net then predicts:
 
-Each model input contains three aligned channels:
+- semantic compartments (background, nucleus, soma, process);
+- boundaries between touching cells;
+- a two-dimensional ownership vector from each cell pixel toward its nucleus.
 
-| Channel | Content |
+The ownership prediction is what allows a process to remain assigned to its cell
+even when it passes near another nucleus. The older binary U-Net is retained as a
+foreground baseline, but it cannot separate individual cells.
+
+```text
+image -> automatic GFAP/DAPI selection -> nucleus detection
+      -> nucleus-guided U-Net -> compartments + boundaries + ownership
+      -> complete individual astrocyte instances
+```
+
+## Data storage
+
+Git contains only code, configuration, tests, and notebooks. Large microscopy
+images, masks, intermediate arrays, checkpoints, and predictions are intentionally
+excluded by `.gitignore`.
+
+The current dataset is stored in this
+[Google Drive folder](https://drive.google.com/drive/folders/15FrdmbZGEWyB2mBgGv2hVpIlkcGQy6tE):
+
+| Drive folder | Content |
 |---|---|
-| 0 | Normalized GFAP intensity |
-| 1 | Binary nucleus mask |
-| 2 | Nucleus-proximity map |
+| `Astrocytes Training Photos` | ten annotated training images |
+| `Astrocytes Training Masks/Astrocytes Final Masks` | matching `*_seg.npy` masks |
+| `Astrocytes Morphology Photos` | images reserved for prediction |
+| `Astroseg Outputs` | generated QC, annotations, models, and predictions |
 
-`NucleusGuidedInstanceUNet` uses one shared U-Net and three output heads:
-
-```text
-microscopy image
-    |-- GFAP ---------------------------------------+
-    `-- DAPI -> detected nucleus instances          |
-                    |-- binary nuclei --------------|
-                    `-- proximity map --------------+
-                                                     v
-                                          shared 2D U-Net
-                              +----------------+-----+----------------+
-                              |                |                      |
-                       compartments       cell boundaries     ownership offsets
-                              |                |                      |
-                              +----------------+----------------------+
-                                               v
-                              complete individual astrocyte instances
-```
-
-The heads predict:
-
-- semantic compartments: background, nucleus, soma, and process;
-- boundaries only where different cell IDs touch;
-- a `dy, dx` vector from every cell pixel toward its owning nucleus.
-
-The ownership head is important when a long process passes closer to another
-nucleus. Nearest-nucleus assignment alone cannot solve that case.
-
-The previous binary U-Net remains available. It predicts merged GFAP foreground
-and is useful for creating an initial proposal, but it does not separate cells.
-
-## Current project status
-
-The complete instance architecture, training, prediction, annotation import,
-grouped cross-validation, metrics, and QC code are implemented.
-
-No trained instance checkpoint or human-corrected complete-cell dataset is bundled.
-Therefore, the current result for `7d_453` is a nucleus-seeded watershed bootstrap:
-
-```text
-outputs/astrocyte_instances/overlays/7d_453_instances.png
-outputs/astrocyte_instances/overlays/7d_453_compartments.png
-```
-
-It is a proposal for correction, not validated process ownership or a trusted cell
-count. Learned ownership begins only after importing complete-cell annotations.
-
-## Repository structure
-
-```text
-configs/
-    train_instances.yaml            final instance-model configuration
-    train_binary.yaml               retained binary foreground baseline
-
-data/
-    raw/                             original microscopy files
-    interim/                         channels, nucleus labels, proximity maps, QC
-    annotations/
-        originals/                   preserved human instance masks
-        compartment_originals/       preserved optional compartment masks
-        binary/                      derived binary masks
-        qc/                          annotation overlays
-    metadata/                        manifests and annotation pair tables
-
-src/astroseg/
-    io/                              TIFF and manifest loading
-    preprocessing/                   channels, nuclei, patches, instance targets
-    datasets/                        semantic and instance PyTorch datasets
-    models/                          binary and nucleus-guided U-Nets
-    training/                        losses, trainers, metrics, grouped folds
-    inference/                       patch prediction and full-image stitching
-    postprocessing/                  instance reconstruction and cleanup
-    visualization/                   QC overlays
-    analysis/                        per-cell morphology
-
-scripts/                             command-line workflows
-notebooks/00_run_pipeline.ipynb      routine operational notebook
-tests/                               synthetic regression tests
-outputs/                             automatic results and checkpoints
-```
-
-Reusable implementation is kept under `src/astroseg/`. Files under `scripts/`
-connect configuration and paths to those modules.
-
-## Manifest
-
-The manifest is the central index: one row represents one microscopy image.
-
-Important columns are:
-
-| Column | Meaning |
-|---|---|
-| `image_id` | Stable image identifier |
-| `path` | Original microscopy image |
-| `gfap_channel`, `dapi_channel` | Selected image channels |
-| `cellpose_mask_path` | Nucleus instance labels; legacy name retained for compatibility |
-| `annotation_path` | Binary GFAP mask |
-| `instance_annotation_path` | Human complete-cell instance IDs |
-| `compartment_annotation_path` | Optional human nucleus/soma/process classes |
-| `annotation_status` | `none`, `seed`, `pseudo`, `corrected`, or `reviewed` |
-| `annotation_source`, `annotator`, `review_status` | Annotation provenance |
-| `split` | `train`, `val`, `test`, or empty |
-
-Only `seed`, `corrected`, and `reviewed` annotations enter training by default.
-Automatic `pseudo` predictions are stored separately and never become trusted
-targets without human correction.
-
-Extra grouping columns such as `well_id`, `experiment_id`, or
-`biological_replicate` may be added.
+Public folder identifiers are documented in `configs/google_drive.yaml`; Google
+credentials must never be committed. During a run, files live under the ignored
+`.astroseg_runtime/` directory and can be deleted and downloaded again safely.
 
 ## Installation
 
@@ -145,211 +62,161 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,notebooks]"
 ```
 
-Because the package uses a `src/` layout, either install it with `pip install -e .`
-or run the repository's configured Python environment.
-
-## Routine automatic run
-
-Place `.bmp`, `.tif`, and `.tiff` images together under `data/raw/`. File format
-does not determine the split; `train`, `val`, and `test` are assigned in the
-manifest. RGB BMP and ordinary RGB TIFF inputs expose `Red`, `Green`, and `Blue`
-channels. OME-TIFF keeps its metadata channel names.
-
-Build the manifest when starting a new dataset:
+The Drive automation also requires [rclone](https://rclone.org/downloads/). After
+installing it, create a Google Drive remote once:
 
 ```powershell
-.\.python311\python.exe scripts\build_manifest.py `
-  --raw-dir data/raw `
-  --output data/metadata/manifest.csv
+rclone config
 ```
 
-Then run:
+Choose `New remote`, name it `astroseg-drive`, choose Google Drive, and complete
+the browser sign-in. Do not copy OAuth tokens into this repository.
+
+rclone currently warns that its shared Google client ID is being retired during
+2026. The authorized remote works now, but configure a private Google client ID
+in rclone before that shared client is disabled.
+
+## Run the complete Drive workflow
+
+From the repository root, run:
 
 ```powershell
-.\.python311\python.exe scripts\prepare_dataset.py
-.\.python311\python.exe scripts\generate_bootstrap_pseudo_labels.py --overwrite
-.\.python311\python.exe scripts\generate_astrocyte_instances.py --overwrite
+powershell -ExecutionPolicy Bypass -File scripts/run_drive_pipeline.ps1 `
+  -Annotator "your-name"
 ```
 
-These commands automatically:
+That single command performs the operational workflow:
 
-1. select or extract GFAP and DAPI channels;
-2. detect nucleus instances from DAPI;
-3. build nucleus masks and proximity maps;
-4. generate a binary GFAP proposal;
-5. create watershed-based individual-cell proposals and QC overlays.
+1. downloads training images, masks, and test images from Drive;
+2. creates a manifest with explicit `train` and `test` rows;
+3. selects GFAP/DAPI channels and detects nuclei automatically;
+4. validates and imports the training instance masks without changing originals;
+5. trains fold 0 with grouped cross-validation;
+6. predicts individual astrocytes on every test image;
+7. compresses the complete `.astroseg_runtime/outputs` tree and uploads a dated
+   `.tar.zst` archive to `Astroseg Outputs`.
 
-The same automatic workflow is available in
-`notebooks/00_run_pipeline.ipynb`. Review the user-settings cell and choose
-**Run All**. The other notebooks are intended for learning and troubleshooting.
+Use `-Fold 1` (through `-Fold 4`) to train another validation fold. Use
+`-SkipDownload` when the input files are already synchronized, or `-SkipUpload`
+when testing locally. Training can take a long time; a CUDA-capable GPU is strongly
+recommended.
 
-## Creating real training annotations
+The synchronization operations can also be run separately:
 
-Correct the bootstrap output in an annotation tool. The required instance-mask
-contract is:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action Download
+powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action Upload
+powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action UploadExpanded
+```
 
-- a two-dimensional integer TIFF aligned exactly with the original image;
-- `0` for background;
-- one consistent positive ID across each cell's nucleus, soma, and processes;
-- a different ID for every astrocyte;
-- every cell ID overlaps exactly one detected nucleus.
+`Upload` creates a compact dated backup archive. `UploadExpanded` places every
+generated file into its matching `metadata/`, `interim/`, `annotations/`,
+`checkpoints/`, or `instance_predictions/` Drive subfolder.
 
-Cellpose exports such as
-`BMP4_24h_20x_20240307_145_seg.npy` are supported directly. Put them under:
+## Output layout
 
 ```text
-data/manual_exports/
+.astroseg_runtime/
+    dataset/                         downloaded inputs; never modified
+        training_images/
+        training_masks/
+        test_images/
+    outputs/                         uploaded to Drive after a run
+        metadata/                    manifests and split assignments
+        interim/                     channels, nuclei, distance maps, QC
+        annotations/                 preserved imports and derived masks
+        checkpoints/                 trained weights and learning history
+        instance_predictions/
+            raw_heads/               model probabilities and ownership offsets
+            labels/                  complete-cell instance IDs
+            compartments/            nucleus/soma/process classes
+            overlays/                visual QC
+            cell_measurements.csv
 ```
 
-The basename before `_seg.npy` must equal the manifest `image_id`. The importer
-extracts Cellpose's internal `masks` array and preserves the complete original
-file. Because Cellpose uses a pickled NumPy dictionary, import only trusted files.
+Human annotations and automatic predictions are deliberately stored separately.
+Predictions never overwrite reviewed masks.
 
-Import every matching Cellpose export without preparing a CSV:
+The upload command archives the full tree because the uncompressed intermediate
+arrays are several gigabytes and contain hundreds of small files. Extract an
+archive with `tar --zstd -xf <archive-name>.tar.zst`; its top-level directory is
+`outputs/`. The local temporary archive is removed only after a successful upload.
 
-```powershell
-.\.python311\python.exe scripts\import_instance_annotations.py `
-  --manifest data/metadata/manifest.csv `
-  --cellpose-dir data/manual_exports `
-  --output-manifest data/metadata/manifest_instances.csv `
-  --annotator Segev
-```
+## Annotation contract
 
-For the example filename, the manifest must contain the image ID
+The supplied `*_seg.npy` files are matched by basename. For example,
+`BMP4_24h_20x_20240307_145_seg.npy` belongs to image ID
 `BMP4_24h_20x_20240307_145`.
 
-An optional compartment mask may use:
+A trainable complete-cell mask must be:
 
-```text
-0 = background
-1 = nucleus
-2 = soma
-3 = process
-```
+- a two-dimensional integer array with exactly the image height and width;
+- `0` for background and one positive ID per astrocyte;
+- one consistent ID across that cell's nucleus, soma, and processes;
+- aligned with the image; a unique detected nucleus should lie near each cell soma.
 
-If filenames do not match the image IDs, or if compartment masks are also
-available, create a pair table instead:
+The importer preserves the original Cellpose file, derives a compatibility binary
+mask, generates a QC overlay, and records provenance in the manifest. Because GFAP
+often surrounds rather than overlaps the nucleus, cells and nuclei are paired by
+unique nearby centroids. Unmatched fragments still supervise segmentation but are
+excluded from ownership-vector loss. A mask that contains only nuclei is not enough
+to train complete-cell process ownership.
 
-```csv
-image_id,instance_mask_path,compartment_mask_path,annotation_status,annotator,review_status
-7d_453,exports/7d_453_cells.tiff,exports/7d_453_compartments.tiff,seed,AB,pending
-```
+Annotation states are `none`, `seed`, `pseudo`, `corrected`, and `reviewed`. Only
+`seed`, `corrected`, and `reviewed` enter training by default. Important manifest
+fields are:
 
-Import without modifying the original export:
-
-```powershell
-.\.python311\python.exe scripts\import_instance_annotations.py `
-  --manifest data/metadata/manifest.csv `
-  --pairs-csv data/metadata/instance_pairs.csv `
-  --output-manifest data/metadata/manifest_instances.csv `
-  --annotator AB
-```
-
-The importer validates dimensions and cell-to-nucleus mapping, preserves the
-original files, derives a binary mask for compatibility, and produces QC overlays.
-
-## Training
-
-Update `configs/train_instances.yaml`:
-
-```yaml
-data:
-  manifest_path: data/metadata/manifest_instances.csv
-
-cross_validation:
-  enabled: true
-  n_splits: 5
-  group_column: image_id   # use well_id when several images share a well
-```
-
-All patches from one image or well inherit the same fold. Fold assignment happens
-before patch extraction, preventing train/validation leakage.
-
-For a very small dataset, set `n_splits` no higher than the number of independent
-images or wells.
-
-Run an engineering test first:
-
-```powershell
-.\.python311\python.exe scripts\train_instances.py --smoke-test
-```
-
-Then train a real fold:
-
-```powershell
-.\.python311\python.exe scripts\train_instances.py `
-  --config configs/train_instances.yaml `
-  --fold 0
-```
-
-Training writes:
-
-```text
-outputs/checkpoints/astrocyte_instances/best.pt
-outputs/checkpoints/astrocyte_instances/last.pt
-outputs/checkpoints/astrocyte_instances/history.csv
-outputs/checkpoints/astrocyte_instances/cross_validation_assignments.csv
-```
-
-## Prediction and evaluation
-
-Predict complete individual cells:
-
-```powershell
-.\.python311\python.exe scripts\predict_astrocyte_instances.py `
-  --config configs/train_instances.yaml `
-  --checkpoint outputs/checkpoints/astrocyte_instances/best.pt `
-  --split test
-```
-
-Automatic outputs are stored separately from human annotations:
-
-```text
-outputs/instance_predictions/raw_heads/       probabilities and ownership offsets
-outputs/instance_predictions/labels/          individual cell IDs
-outputs/instance_predictions/compartments/    nucleus/soma/process classes
-outputs/instance_predictions/overlays/        visual QC
-outputs/instance_predictions/cell_measurements.csv
-```
-
-Evaluate against held-out human instance masks:
-
-```powershell
-.\.python311\python.exe scripts\evaluate_astrocyte_instances.py `
-  --manifest outputs/instance_predictions/manifest.csv
-```
-
-Instance evaluation reports object precision, recall, F1, matched IoU, panoptic
-quality, and process ownership accuracy when explicit compartment truth exists.
-
-## Annotation loop
-
-```text
-complete-cell seed annotations
-            -> initial training
-            -> predictions on unlabeled images
-            -> manual process/cell correction
-            -> import as corrected or reviewed
-            -> grouped retraining
-```
-
-This loop allows the project to begin with only a small number of complete-cell
-annotations while keeping automatic and human data separate.
-
-## Main scripts
-
-| Script | Purpose |
+| Field | Meaning |
 |---|---|
-| `prepare_dataset.py` | Automatic channel selection, nucleus detection, model inputs, and QC |
-| `generate_bootstrap_pseudo_labels.py` | Initial binary GFAP proposal |
-| `generate_astrocyte_instances.py` | Watershed bootstrap of individual cells |
-| `import_instance_annotations.py` | Preserve and validate complete-cell annotations |
-| `train_instances.py` | Train compartment, boundary, and ownership heads |
-| `predict_astrocyte_instances.py` | Predict complete individual cells |
-| `evaluate_astrocyte_instances.py` | Evaluate cell separation and process ownership |
-| `generate_pseudo_labels.py` | Generate automatic labels from the retained binary model |
-| `select_unlabeled_patches.py` | Rank uncertain patches for correction |
-| `import_existing_annotations.py` | Import binary-only annotations |
+| `annotation_path` | derived binary GFAP mask |
+| `instance_annotation_path` | human complete-cell instance IDs |
+| `annotation_status` | annotation lifecycle state |
+| `annotation_source`, `annotator` | provenance |
+| `review_status` | review state |
+| `split` | `train`, `val`, or `test` |
+
+## Training and validation
+
+The Drive workflow uses `configs/train_instances_drive.yaml`. The standard local
+template remains in `configs/train_instances.yaml`.
+
+Because there are only ten labeled images, cross-validation is grouped before
+patch extraction. All patches from the same image remain in one fold. If several
+images later come from the same biological well, add `well_id` to the manifest and
+change `group_column` from `image_id` to `well_id`.
+
+Run a quick engineering check without real data:
+
+```powershell
+.\.python311\python.exe scripts/train_instances.py --smoke-test
+```
+
+The intended annotation loop is:
+
+```text
+seed masks -> initial training -> predictions on unlabeled images
+           -> manual correction -> corrected/reviewed import -> retraining
+```
+
+## Repository map
+
+```text
+configs/                 local and Drive-backed pipeline settings
+src/astroseg/io/         BMP/TIFF/OME-TIFF and manifest loading
+src/astroseg/preprocessing/ channels, nuclei, patches, instance targets
+src/astroseg/datasets/   aligned semantic and instance datasets
+src/astroseg/models/     binary and nucleus-guided U-Nets
+src/astroseg/training/   losses, metrics, grouped folds, trainers
+src/astroseg/inference/  patch and full-image prediction
+src/astroseg/postprocessing/ complete-cell reconstruction
+src/astroseg/analysis/   per-cell morphology measurements
+scripts/                 command-line and Drive workflows
+notebooks/               guided execution and learning
+tests/                   synthetic regression tests
+```
+
+Reusable logic lives under `src/astroseg/`; scripts only connect that logic to
+configuration and file paths.
 
 ## Tests
 
@@ -357,22 +224,19 @@ annotations while keeping automatic and human data separate.
 .\.python311\python.exe -m pytest -q
 ```
 
-The tests cover BMP/TIFF loading, nucleus/GFAP preprocessing, patch alignment,
-annotation preservation, grouped folds, instance targets, model heads, losses,
-ownership offsets, object metrics, notebooks, and dataset behavior.
+Tests cover mixed BMP/TIFF loading (including incorrect filename extensions),
+channel and nucleus preparation, annotation preservation, grouped folds, instance
+targets, model heads, losses, ownership offsets, object metrics, and notebooks.
 
-## Important limitations
+## Current limitations
 
-- The current `7d_453` result is a watershed bootstrap, not a learned or validated
-  process assignment.
-- A trained ownership model requires human-corrected complete-cell instance masks.
-- DAPI nucleus detection is automatic but classical, and must be inspected for new
-  staining, magnification, or acquisition conditions.
-- True process crossings can be ambiguous in a two-dimensional image. Z-stacks or
-  additional markers may be required when the acquisition contains insufficient
-  ownership information.
-- Per-cell morphology is only as reliable as the instance and compartment masks.
-- No trained checkpoint or biological research dataset is included.
+- No validated trained checkpoint is committed; it must be learned from the Drive
+  annotations.
+- DAPI nucleus detection is automatic but classical and should be checked in QC
+  when staining, magnification, or acquisition changes.
+- Process crossings may be inherently ambiguous in 2D; some cases require a
+  Z-stack or additional markers.
+- Measurements are only as reliable as the instance and compartment masks.
 
-Raw microscopy, external Cellpose files, and original human annotations are never
-overwritten by the automatic prediction workflow.
+Raw images, Cellpose exports, and original human annotations are never overwritten
+by preparation, training, or prediction.

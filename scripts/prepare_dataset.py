@@ -11,6 +11,7 @@ from astroseg.io import get_channel, load_manifest, load_ome_tiff, validate_mani
 from astroseg.preprocessing import (
     create_nucleus_proximity_map,
     detect_nucleus_instances,
+    prepare_dapi_for_detection,
     select_model_channels,
 )
 from astroseg.visualization import (
@@ -83,8 +84,11 @@ def prepare_dataset(
         )
         gfap = get_channel(microscopy, selection.gfap_channel)
         dapi = get_channel(microscopy, selection.dapi_channel)
+        detection_dapi, dapi_preprocessing = prepare_dapi_for_detection(
+            dapi, gfap, selection
+        )
         detection = detect_nucleus_instances(
-            dapi,
+            detection_dapi,
             gaussian_sigma=gaussian_sigma,
             threshold_scale=threshold_scale,
             min_nucleus_area=min_nucleus_area,
@@ -141,6 +145,7 @@ def prepare_dataset(
                 "gfap_channel": selection.gfap_channel,
                 "dapi_channel": selection.dapi_channel,
                 "channel_selection_method": selection.method,
+                "dapi_preprocessing": dapi_preprocessing,
                 "red_score": selection.red_score,
                 "green_score": selection.green_score,
                 "nucleus_threshold": detection.threshold,

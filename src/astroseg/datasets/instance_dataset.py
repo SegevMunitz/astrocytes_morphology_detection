@@ -136,6 +136,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
                 compartments,
                 soma_radius=soma_radius,
                 offset_scale=offset_scale,
+                max_nucleus_distance=max_nucleus_distance,
             )
             coordinates = generate_patch_coordinates(
                 microscopy.image.shape[-2:], patch_size, overlap
@@ -190,6 +191,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
             compartments,
             soma_radius=self.soma_radius,
             offset_scale=self.offset_scale,
+            max_nucleus_distance=self.max_nucleus_distance,
         )
         self._cache_index = record_index
         self._cache_value = (inputs, targets)
