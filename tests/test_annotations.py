@@ -154,3 +154,22 @@ def test_pseudo_label_artifacts_are_separate_and_binary(tmp_path: Path) -> None:
     assert artifacts.probability_path.parent.name == "probabilities"
     assert artifacts.mask_path.parent.name == "masks"
     assert np.all(tifffile.imread(artifacts.mask_path) == 1)
+
+
+def test_pseudo_label_artifacts_accept_explicit_heuristic_mask(tmp_path: Path) -> None:
+    """A cleaned heuristic mask can override probability argmax for storage."""
+    probabilities = np.stack(
+        (np.full((5, 6), 0.75, dtype=np.float32), np.full((5, 6), 0.25, dtype=np.float32))
+    )
+    hard_mask = np.zeros((5, 6), dtype=np.uint8)
+    hard_mask[1:4, 2:5] = 1
+
+    artifacts = save_pseudo_label_artifacts(
+        "heuristic",
+        probabilities,
+        np.ones((5, 6), dtype=np.uint16),
+        tmp_path / "pseudo",
+        hard_mask=hard_mask,
+    )
+
+    np.testing.assert_array_equal(tifffile.imread(artifacts.mask_path), hard_mask)

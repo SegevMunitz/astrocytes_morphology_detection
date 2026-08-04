@@ -207,6 +207,7 @@ astrocytes_morphology_detection/
 | `io/manifest.py` | `ManifestRow`, `load_manifest` | Defines and validates the one-row-per-image data contract. It rejects missing columns, duplicate IDs, invalid states, and annotated rows without an annotation path. |
 | `preprocessing/channels.py` | `select_model_channels` | Uses explicit metadata when available and automatically maps RGB composites to Blue DAPI plus the stronger Red/Green structural channel. |
 | `preprocessing/nucleus_detection.py` | `detect_nucleus_instances` | Detects bright DAPI nuclei with percentile normalization, Gaussian smoothing, Otsu thresholding, and marker watershed. |
+| `preprocessing/gfap_detection.py` | `detect_gfap_bootstrap_mask` | Creates an initial automatic GFAP pseudo mask with connected weak/strong intensity thresholds; it is not treated as human ground truth. |
 | `preprocessing/normalize.py` | `percentile_normalize` | Scales GFAP intensities to `[0, 1]` for model input. The result is not intended for biological intensity comparisons. |
 | `preprocessing/nuclei.py` | `validate_nucleus_labels`, `labels_to_binary_mask` | Checks exact image alignment and valid instance labels, then converts all positive nucleus IDs to foreground. |
 | `preprocessing/distance_maps.py` | `create_nucleus_proximity_map` | Converts the binary nucleus mask into a bounded distance-derived context channel. |
@@ -809,6 +810,46 @@ python scripts/create_patches.py \
 These commands are strongly useful for debugging alignment, but their outputs are
 not prerequisites for `train.py`.
 
+### Optional bootstrap: generate an automatic GFAP proposal
+
+When no trained astrocyte checkpoint or manual seed mask exists yet, generate an
+initial proposal directly from the separated GFAP channel:
+
+```powershell
+.\.python311\python.exe scripts\generate_bootstrap_pseudo_labels.py
+```
+
+The detector percentile-normalizes GFAP, smooths noise, uses Otsu to identify
+strong signal, and retains weaker pixels only when they are connected to strong
+signal. This hysteresis step recovers many dim processes without accepting every
+faint background pixel. Tiny components are removed and small enclosed holes are
+filled.
+
+The command writes:
+
+```text
+outputs/pseudo_labels/probabilities/<image_id>.npy
+outputs/pseudo_labels/masks/<image_id>.tiff
+outputs/pseudo_labels/overlays/<image_id>.png
+outputs/pseudo_labels/bootstrap_report.csv
+outputs/pseudo_labels/manifest.csv
+```
+
+The source manifest is not modified. Rows in the generated manifest use
+`annotation_status=pseudo`, `review_status=pending`, and
+`annotation_source=heuristic:gfap_hysteresis_otsu`. Pseudo rows remain excluded
+from supervised training by default.
+
+This result is automatic but it is not a validated annotation and it is not a
+trained neural-network prediction. It can be used immediately for visual testing,
+as a mask to correct, or as an explicitly configured experimental pseudo target.
+For scientifically supervised training, correct and import at least a small subset
+as `corrected` or `reviewed`.
+
+For new staining or acquisition conditions, inspect the overlays and tune
+`--low-threshold-ratio`, `--high-threshold-scale`, or `--min-component-area` if
+needed. Use `--overwrite` only when intentionally regenerating automatic files.
+
 ### 5. Import the first seed annotations
 
 Create a pair table connecting manifest image IDs to the masks exported from your
@@ -1063,6 +1104,7 @@ exists.
 | `prepare_dataset.py` | Manifest and microscopy TIFFs | Channels, internal nucleus labels, model inputs, QC, updated manifest | Automatically prepares all images in one batch command. |
 | `extract_channels.py` | Manifest and OME-TIFFs | GFAP/DAPI `.npy` files and previews | Makes channel selection easy to inspect. |
 | `generate_nucleus_inputs.py` | Manifest, images, existing nucleus labels | Binary masks, proximity maps, previews, montages | Validates nucleus alignment and visualizes the model inputs. |
+| `generate_bootstrap_pseudo_labels.py` | Manifest and GFAP channels | Heuristic probabilities, masks, overlays, report, separate pseudo manifest | Bootstraps proposals before a trained astrocyte checkpoint exists. |
 | `create_patches.py` | Manifest images | Patch-index CSV | Records deterministic patch coordinates without copying pixel arrays. |
 | `import_existing_annotations.py` | Manifest and image-mask pair CSV | Archived originals, binary masks, QC overlays, new manifest | Adds seed/corrected/reviewed human targets non-destructively. |
 | `train.py` | YAML config and annotated manifest | Checkpoints, history, optional fold assignments | Trains the configured baseline or runs the synthetic smoke test. |
@@ -1130,7 +1172,9 @@ the output probabilities are reconstructed at the original resolution.
 ### Pseudo-label and correction path
 
 ```text
-scripts/generate_pseudo_labels.py
+scripts/generate_bootstrap_pseudo_labels.py  (before the first checkpoint)
+                or
+scripts/generate_pseudo_labels.py            (after model training)
     -> annotations/pseudo_labels.py
     -> outputs/pseudo_labels/
     -> scripts/select_unlabeled_patches.py
@@ -1151,6 +1195,7 @@ Current coverage includes:
 
 - OME-TIFF axis handling, dtype, metadata, and named channels;
 - normalization and nucleus-label validation;
+- automatic GFAP bootstrap hysteresis and cleanup;
 - proximity-map range and edge cases;
 - complete patch coverage and exact probability stitching;
 - dataset lifecycle filtering, shapes, dtypes, and class ranges;
@@ -1221,6 +1266,9 @@ decision.
   compatible pretrained model or manually validated nucleus instance masks; the
   existing label-file interface is designed so such a model can replace the current
   detector without changing downstream training.
+- Bootstrap GFAP masks are intensity-based heuristic proposals, not validated
+  ground truth or neural-network predictions. They remain `pseudo` and are excluded
+  from supervised training unless explicitly corrected or experimentally enabled.
 - External Cellpose labels remain supported, but Cellpose execution is not embedded.
 - The supported scientific target is binary GFAP-positive structure segmentation.
 - The multiclass configuration is future scaffolding, not a completed experiment.

@@ -28,11 +28,13 @@ def save_pseudo_label_artifacts(
     gfap_image: np.ndarray,
     output_directory: str | Path,
     overwrite: bool = False,
+    hard_mask: np.ndarray | None = None,
 ) -> PseudoLabelArtifacts:
     """Save automatic probabilities, a binary mask, and a QC overlay.
 
     Inputs must contain two normalized class-probability planes aligned with the
-    GFAP image. Existing artifacts are protected unless overwrite is explicit.
+    GFAP image. An optional explicit hard mask supports heuristic proposals whose
+    cleanup cannot be represented by a simple probability argmax.
     """
     if not image_id.strip():
         raise ValueError("image_id must not be empty")
@@ -44,6 +46,10 @@ def save_pseudo_label_artifacts(
         raise ValueError("Probabilities must be finite values in [0, 1]")
     if not np.allclose(probabilities.sum(axis=0), 1.0, atol=1e-4):
         raise ValueError("Class probabilities must sum to one at every pixel")
+    if hard_mask is not None:
+        hard_mask = np.asarray(hard_mask)
+        if hard_mask.shape != gfap_image.shape or not np.isin(hard_mask, (0, 1)).all():
+            raise ValueError("Explicit pseudo-label mask must be aligned and binary")
 
     destination = Path(output_directory)
     probability_path = destination / "probabilities" / f"{image_id}.npy"
@@ -53,7 +59,11 @@ def save_pseudo_label_artifacts(
         if path.exists() and not overwrite:
             raise FileExistsError(f"Refusing to overwrite pseudo-label artifact: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-    mask = probabilities.argmax(axis=0).astype(np.uint8)
+    mask = (
+        probabilities.argmax(axis=0).astype(np.uint8)
+        if hard_mask is None
+        else hard_mask.astype(np.uint8, copy=False)
+    )
     np.save(probability_path, probabilities.astype(np.float32, copy=False), allow_pickle=False)
     tifffile.imwrite(mask_path, mask)
     save_segmentation_overlay(gfap_image, mask > 0, overlay_path, title="Pseudo-label overlay")
