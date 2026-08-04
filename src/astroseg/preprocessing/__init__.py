@@ -3,6 +3,11 @@
 from astroseg.preprocessing.channels import ChannelSelection, select_model_channels
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
 from astroseg.preprocessing.gfap_detection import GfapBootstrapResult, detect_gfap_bootstrap_mask
+from astroseg.preprocessing.instance_targets import (
+    AstrocyteInstanceTargets,
+    build_astrocyte_instance_targets,
+    map_cells_to_nuclei,
+)
 from astroseg.preprocessing.nucleus_detection import NucleusDetectionResult, detect_nucleus_instances
 from astroseg.preprocessing.normalize import percentile_normalize
 from astroseg.preprocessing.nuclei import labels_to_binary_mask, validate_nucleus_labels
@@ -16,6 +21,7 @@ from astroseg.preprocessing.patches import (
 __all__ = [
     "ChannelSelection",
     "GfapBootstrapResult",
+    "AstrocyteInstanceTargets",
     "NucleusDetectionResult",
     "PatchCoordinates",
     "create_nucleus_proximity_map",
@@ -24,6 +30,8 @@ __all__ = [
     "extract_patch",
     "generate_patch_coordinates",
     "labels_to_binary_mask",
+    "build_astrocyte_instance_targets",
+    "map_cells_to_nuclei",
     "percentile_normalize",
     "select_model_channels",
     "stitch_probability_patches",

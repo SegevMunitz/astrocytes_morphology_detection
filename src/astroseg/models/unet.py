@@ -90,11 +90,11 @@ class UNet(nn.Module):
         self.decoder1 = UpBlock(base_channels * 2, base_channels, base_channels)
         self.output = nn.Conv2d(base_channels, num_classes, kernel_size=1)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Encode and decode a batch into full-resolution class logits.
+    def _decode_features(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Encode and decode a batch into full-resolution shared features.
 
         Inputs must follow ``[B, C, H, W]`` and be at least eight pixels per
-        spatial axis. Output height and width match the original tensor.
+        spatial axis. The returned feature map supports one or several task heads.
         """
         if inputs.ndim != 4:
             raise ValueError(f"UNet expects [B, C, H, W] input; received {tuple(inputs.shape)}")
@@ -106,5 +106,51 @@ class UNet(nn.Module):
         encoded = self.bottleneck(self.pool(skip3))
         decoded = self.decoder3(encoded, skip3)
         decoded = self.decoder2(decoded, skip2)
-        decoded = self.decoder1(decoded, skip1)
-        return self.output(decoded)
+        return self.decoder1(decoded, skip1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Encode and decode a batch into full-resolution class logits.
+
+        The semantic baseline retains its tensor-only API while the shared feature
+        method allows the instance model to add boundary and ownership heads.
+        """
+        return self.output(self._decode_features(inputs))
+
+
+class NucleusGuidedInstanceUNet(UNet):
+    """Multi-head U-Net for complete nucleus-owned astrocyte instances.
+
+    The semantic head distinguishes background, nucleus, soma, and process. A
+    boundary head separates touching cells, while offsets point every cell pixel
+    toward the nucleus that owns it.
+    """
+
+    def __init__(
+        self,
+        input_channels: int = 3,
+        compartment_classes: int = 4,
+        base_channels: int = 32,
+    ) -> None:
+        """Build a shared U-Net decoder with three full-resolution task heads.
+
+        Four compartment classes are the supported scientific contract. Boundary
+        logits are binary and offsets contain scale-normalized ``dy, dx`` values.
+        """
+        if compartment_classes != 4:
+            raise ValueError("The instance model requires four compartment classes")
+        super().__init__(input_channels, compartment_classes, base_channels)
+        self.boundary_output = nn.Conv2d(base_channels, 2, kernel_size=1)
+        self.offset_output = nn.Conv2d(base_channels, 2, kernel_size=1)
+
+    def forward(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return semantic logits, boundary logits, and ownership offsets.
+
+        The regression head remains unbounded so processes longer than the target
+        normalization scale still reach their owning nucleus without truncation.
+        """
+        features = self._decode_features(inputs)
+        return {
+            "semantic_logits": self.output(features),
+            "boundary_logits": self.boundary_output(features),
+            "offsets": self.offset_output(features),
+        }

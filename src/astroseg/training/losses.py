@@ -83,3 +83,70 @@ class CrossEntropyDiceLoss(nn.Module):
         """
         cross_entropy = F.cross_entropy(logits, target.long())
         return self.cross_entropy_weight * cross_entropy + self.dice_weight * self.dice(logits, target)
+
+
+class NucleusGuidedInstanceLoss(nn.Module):
+    """Joint compartment, cell-boundary, and nucleus-ownership objective.
+
+    Semantic and boundary heads use cross-entropy plus Dice. Smooth-L1 offset loss
+    is evaluated only on pixels belonging to an annotated astrocyte instance.
+    """
+
+    def __init__(
+        self,
+        semantic_weight: float = 1.0,
+        boundary_weight: float = 1.0,
+        offset_weight: float = 1.0,
+    ) -> None:
+        """Configure non-negative task weights with at least one active objective.
+
+        Separate weights allow boundary and long-process ownership supervision to
+        be balanced against the more numerous semantic pixels.
+        """
+        super().__init__()
+        weights = (semantic_weight, boundary_weight, offset_weight)
+        if any(weight < 0 for weight in weights) or sum(weights) == 0:
+            raise ValueError("Instance-loss weights must be non-negative with a positive sum")
+        self.semantic_weight = semantic_weight
+        self.boundary_weight = boundary_weight
+        self.offset_weight = offset_weight
+        self.semantic_loss = CrossEntropyDiceLoss()
+        self.boundary_loss = CrossEntropyDiceLoss()
+
+    def forward(
+        self,
+        outputs: dict[str, torch.Tensor],
+        targets: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Compute the weighted multi-head loss for one aligned training batch.
+
+        Expected keys are explicit so an ordinary semantic model or incomplete
+        target dictionary cannot be trained accidentally under the instance task.
+        """
+        output_keys = {"semantic_logits", "boundary_logits", "offsets"}
+        target_keys = {"semantic", "boundary", "offsets", "offset_mask"}
+        missing_outputs = output_keys - set(outputs)
+        missing_targets = target_keys - set(targets)
+        if missing_outputs or missing_targets:
+            raise ValueError(
+                f"Incomplete instance batch; missing outputs={sorted(missing_outputs)}, "
+                f"targets={sorted(missing_targets)}"
+            )
+        semantic = self.semantic_loss(outputs["semantic_logits"], targets["semantic"].long())
+        boundary = self.boundary_loss(outputs["boundary_logits"], targets["boundary"].long())
+        predicted_offsets = outputs["offsets"]
+        target_offsets = targets["offsets"].to(predicted_offsets.dtype)
+        offset_mask = targets["offset_mask"].to(predicted_offsets.dtype)
+        if predicted_offsets.shape != target_offsets.shape:
+            raise ValueError("Predicted and target offsets must have identical shapes")
+        if offset_mask.ndim != 3 or offset_mask.shape != predicted_offsets.shape[:1] + predicted_offsets.shape[2:]:
+            raise ValueError("offset_mask must have shape [B, H, W]")
+        per_value = F.smooth_l1_loss(predicted_offsets, target_offsets, reduction="none")
+        expanded_mask = offset_mask.unsqueeze(1).expand_as(per_value)
+        denominator = expanded_mask.sum().clamp_min(1.0)
+        offset = (per_value * expanded_mask).sum() / denominator
+        return (
+            self.semantic_weight * semantic
+            + self.boundary_weight * boundary
+            + self.offset_weight * offset
+        )

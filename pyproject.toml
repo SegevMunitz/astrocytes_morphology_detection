@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "astrocyte-segmentation"
 version = "0.1.0"
-description = "Baseline semantic-segmentation pipeline for GFAP-positive astrocyte structures"
+description = "Nucleus-guided instance segmentation of complete GFAP-positive astrocytes"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [

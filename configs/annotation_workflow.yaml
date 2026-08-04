@@ -1,9 +1,13 @@
 human_annotation_directory: data/annotations
 pseudo_label_directory: outputs/pseudo_labels
+instance_bootstrap_directory: outputs/astrocyte_instances
+instance_prediction_directory: outputs/instance_predictions
 
 import:
   default_status: seed
-  default_source: manual_cellpose_correction
+  default_source: manual_complete_cell_correction
+  require_one_nucleus_per_cell: true
+  preserve_instance_ids: true
 
 selection:
   annotation_statuses:
@@ -13,4 +17,3 @@ selection:
   overlap: 64
   top_k: 20
   max_patches_per_image: 5
-

@@ -1,4 +1,4 @@
-# Infrastructure-only configuration: multiclass annotations are not yet available.
+# Legacy semantic-only scaffold. Use train_instances.yaml for complete cells.
 seed: 42
 
 data:

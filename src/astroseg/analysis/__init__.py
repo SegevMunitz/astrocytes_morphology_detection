@@ -2,7 +2,11 @@
 
 from astroseg.analysis.aggregate import aggregate_feature_table
 from astroseg.analysis.image_features import extract_image_features
-from astroseg.analysis.morphology import component_morphology
+from astroseg.analysis.morphology import astrocyte_instance_morphology, component_morphology
 
-__all__ = ["aggregate_feature_table", "component_morphology", "extract_image_features"]
-
+__all__ = [
+    "aggregate_feature_table",
+    "astrocyte_instance_morphology",
+    "component_morphology",
+    "extract_image_features",
+]

@@ -1,0 +1,55 @@
+# Final-task model: complete individual astrocytes with nucleus ownership.
+seed: 42
+
+data:
+  manifest_path: data/metadata/manifest.csv
+  patch_size: 512
+  overlap: 64
+  num_workers: 0
+  max_nucleus_distance: 64.0
+  soma_radius: 20.0
+  offset_scale: 256.0
+  train_annotation_statuses:
+    - seed
+    - corrected
+    - reviewed
+
+model:
+  architecture: nucleus_guided_instance_unet
+  input_channels: 3
+  num_classes: 4
+  base_channels: 32
+
+training:
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  early_stopping_patience: 15
+
+loss:
+  semantic_weight: 1.0
+  boundary_weight: 1.0
+  offset_weight: 2.0
+
+cross_validation:
+  enabled: true
+  n_splits: 5
+  validation_fold: 0
+  # Use well_id when several fields originate from one biological well.
+  group_column: image_id
+  fold_column: instance_fold
+
+postprocessing:
+  foreground_threshold: 0.5
+  boundary_threshold: 0.5
+  max_nucleus_to_gfap_distance: 16.0
+  offset_scale: 256.0
+  max_offset_endpoint_distance: 32.0
+  soma_expansion: 4
+  soma_radius: 20.0
+  min_cell_area: 50
+  min_gfap_area: 20
+
+output:
+  directory: outputs/checkpoints/astrocyte_instances

@@ -3,7 +3,7 @@
 from torch import nn
 
 from astroseg.models.segformer import build_segformer
-from astroseg.models.unet import UNet
+from astroseg.models.unet import NucleusGuidedInstanceUNet, UNet
 
 
 def build_model(
@@ -20,6 +20,11 @@ def build_model(
     name = architecture.strip().lower()
     if name == "unet":
         return UNet(input_channels, num_classes, base_channels)
+    if name in {"instance_unet", "nucleus_guided_instance_unet"}:
+        return NucleusGuidedInstanceUNet(input_channels, num_classes, base_channels)
     if name == "segformer":
         return build_segformer(input_channels=input_channels, num_classes=num_classes)
-    raise ValueError(f"Unsupported architecture {architecture!r}; supported architecture: unet")
+    raise ValueError(
+        f"Unsupported architecture {architecture!r}; supported architectures: "
+        "unet, nucleus_guided_instance_unet"
+    )

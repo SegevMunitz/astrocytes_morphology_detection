@@ -1,2 +1,2 @@
-image_id,experiment_id,timepoint,treatment,magnification,path,gfap_channel,dapi_channel,cellpose_mask_path,annotation_path,annotation_status,annotation_source,annotator,review_status,split
-7d_453,,,,,data/raw/7d_453.tif,Green,Blue,data/interim/nucleus_labels/7d_453_nuclei.tiff,,none,,,,
+image_id,experiment_id,timepoint,treatment,magnification,path,gfap_channel,dapi_channel,cellpose_mask_path,annotation_path,instance_annotation_path,compartment_annotation_path,annotation_status,annotation_source,annotator,review_status,split
+7d_453,,,,,data/raw/7d_453.tif,Green,Blue,data/interim/nucleus_labels/7d_453_nuclei.tiff,,,,none,,,,

@@ -3,9 +3,13 @@ patch_size: 512
 overlap: 64
 num_workers: 4
 max_nucleus_distance: 64.0
+soma_radius: 20.0
+offset_scale: 256.0
 train_annotation_statuses:
   - seed
   - corrected
   - reviewed
 human_annotation_directory: data/annotations
 pseudo_label_directory: outputs/pseudo_labels
+instance_bootstrap_directory: outputs/astrocyte_instances
+instance_prediction_directory: outputs/instance_predictions

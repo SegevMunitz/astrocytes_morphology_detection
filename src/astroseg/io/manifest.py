@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict
 from astroseg.constants import ANNOTATION_STATUSES, MANIFEST_COLUMNS, VALID_SPLITS
 
 
+INSTANCE_COLUMNS = ("instance_annotation_path", "compartment_annotation_path")
+
+
 class ManifestRow(BaseModel):
     """Typed schema for one microscopy image and its annotation lifecycle.
 
@@ -27,6 +30,8 @@ class ManifestRow(BaseModel):
     dapi_channel: str = ""
     cellpose_mask_path: str = ""
     annotation_path: str = ""
+    instance_annotation_path: str = ""
+    compartment_annotation_path: str = ""
     annotation_status: str = "none"
     annotation_source: str = ""
     annotator: str = ""
@@ -40,7 +45,14 @@ def validate_manifest(manifest: pd.DataFrame) -> None:
     The check covers required columns, unique image IDs, primary image paths,
     split values, annotation states, and required paths for annotated rows.
     """
-    missing = [column for column in MANIFEST_COLUMNS if column not in manifest.columns]
+    for column in INSTANCE_COLUMNS:
+        if column not in manifest.columns:
+            manifest[column] = ""
+    missing = [
+        column
+        for column in MANIFEST_COLUMNS
+        if column not in manifest.columns and column not in INSTANCE_COLUMNS
+    ]
     if missing:
         raise ValueError(f"Manifest is missing required columns: {missing}")
     image_ids = manifest["image_id"].astype(str).str.strip()
@@ -80,6 +92,9 @@ def load_manifest(path: str | Path) -> pd.DataFrame:
     if not source.is_file():
         raise FileNotFoundError(f"Manifest does not exist: {source}")
     manifest = pd.read_csv(source, dtype=str, keep_default_na=False)
+    for column in INSTANCE_COLUMNS:
+        if column not in manifest.columns:
+            manifest[column] = ""
     validate_manifest(manifest)
     manifest["split"] = manifest["split"].str.strip().str.lower()
     manifest["annotation_status"] = manifest["annotation_status"].str.strip().str.lower()

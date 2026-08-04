@@ -1,24 +1,29 @@
 # Astrocyte Segmentation Pipeline
 
-A research-oriented image-analysis project for segmenting GFAP-positive astrocyte
-structures in multichannel microscopy TIFF and OME-TIFF images.
+A research-oriented image-analysis project for separating complete individual
+GFAP-positive astrocytes in multichannel microscopy TIFF and OME-TIFF images.
 
-The repository implements the complete baseline path from microscopy files and
-automatically detected nucleus labels to patch-based U-Net training, full-resolution prediction,
-quality-control images, grouped cross-validation, and preliminary measurements.
-It also supports a small seed dataset of manually corrected astrocyte masks and an
-iterative annotation workflow for expanding that dataset safely.
+The final task is **nucleus-guided astrocyte instance segmentation**. Every cell
+receives a distinct positive ID, and every cell pixel is classified as nucleus,
+soma, or process. The most important ownership output assigns each process to the
+nucleus—and therefore the astrocyte—that owns it.
 
-The current task is **binary semantic segmentation**:
+The repository retains the existing binary semantic pipeline as an intermediate
+bootstrap rather than replacing it:
 
 ```text
 0 = background
-1 = GFAP-positive astrocyte structure
+1 = GFAP-positive astrocyte structure (merged field)
 ```
 
-The output is one foreground mask for the complete GFAP-positive field. The model
-does not currently identify individual astrocytes or distinguish soma from
-processes.
+That binary mask is useful for initial foreground proposals and annotation, but it
+is not the final scientific output. The final output contract is:
+
+```text
+instance_labels: 0 = background, 1..N = individual complete astrocytes
+compartments:    0 = background, 1 = nucleus, 2 = soma, 3 = process
+ownership:       cell instance ID -> one nucleus instance ID
+```
 
 ## Scientific motivation
 
@@ -27,69 +32,73 @@ is not a complete astrocyte mask. Thin GFAP-positive processes can extend far
 from the nucleus, overlap with neighboring structures, and are often not captured
 well by an instance-segmentation method focused on compact objects.
 
-This project therefore uses nuclei as spatial context rather than as the answer.
-For every pixel, the model combines:
+This project therefore uses nuclei as both spatial context and cell-identity
+anchors, rather than treating a nucleus mask as the complete cell. For every pixel,
+the model combines:
 
 1. GFAP fluorescence, which contains the structure to segment.
 2. A binary nucleus mask, derived from internal or externally supplied instance labels.
 3. A smooth nucleus-proximity map, which tells the model how close the pixel is
    to the nearest detected nucleus.
 
-The model learns the astrocyte target from a small number of human-corrected masks.
-As more masks are corrected and reviewed, they can be added to the training set
-without changing the basic pipeline.
+The instance U-Net shares one encoder/decoder and learns three aligned outputs:
 
-Future multiclass work may separate background, soma, and processes, but the
-implemented and scientifically intended baseline is binary.
+1. semantic compartments: background, nucleus, soma, and process;
+2. cell boundaries: evidence that touching structures belong to different cells;
+3. ownership offsets: a two-dimensional vector from every cell pixel toward the
+   nucleus that owns it.
+
+The third head is essential for long or crossing processes. A nearest-nucleus rule
+cannot know ownership when a process passes closer to another cell. Learned offsets
+can use image appearance and annotated examples to predict the intended owner.
 
 ## The project in one diagram
 
 ```text
 microscopy TIFF
-    |
-    |-- automatic GFAP channel -----------> percentile normalization ------+
-    |                                                                      |
-    |                                                                      v
-    |-- automatic DAPI channel --> classical Otsu + watershed               |
-    |                                      (not a neural network)            |
-    |                                                   --> nucleus instances|
-                                                  |-- binary nucleus mask ->|
-                                                  `-- proximity map --------+
-                                                                           |
-                                                                           v
-Human astrocyte mask --> validated binary target [H, W] ------------> 2D U-Net
-                                                                           |
-                                                                           v
-                                                        background / astrocyte
-                                                                           |
-                                        +----------------------------------+
-                                        | probabilities, mask, overlay     |
-                                        | metrics and preliminary features |
-                                        +----------------------------------+
+    |-- GFAP channel --------------------> normalized appearance -----------+
+    `-- DAPI channel --> automatic nucleus instances                        |
+                              |-- binary nucleus mask ----------------------|
+                              `-- nucleus proximity ------------------------+
+                                                                            |
+complete-cell instance annotation + optional compartments ------------------+
+                                                                            v
+                                                     shared 2D instance U-Net
+                                      +----------------+----------+----------+
+                                      |                |          |
+                                      v                v          v
+                               compartments       boundaries  ownership offsets
+                                      |                |          |
+                                      +----------------+----------+
+                                                       v
+                                  one ID per complete nucleus+soma+process cell
 ```
 
 The manifest is the index connecting all these files. One manifest row describes
 one microscopy image, its channel names, its nucleus labels, its annotation state,
 and its train/validation/test assignment.
 
-## The two masks must not be confused
+## The masks must not be confused
 
-There are two different segmentation-like inputs in this project:
+There are four related but distinct label files:
 
-| File | Manifest column | What it contains | How it is used |
+| File | Manifest column | Content | Role |
 |---|---|---|---|
-| Nucleus instance mask | `cellpose_mask_path` (legacy column name) | `0` for background and positive instance IDs for nuclei | Converted into two model-input channels |
-| Astrocyte annotation | `annotation_path` | Binary GFAP-positive target used as ground truth | Used only for training and evaluation |
+| Nucleus instances | `cellpose_mask_path` (legacy name) | `0` background, positive nucleus IDs | Input/QC and identity anchors for every image |
+| Binary GFAP mask | `annotation_path` | `0/1` merged astrocyte foreground | Existing binary baseline and bootstrap |
+| Complete-cell instances | `instance_annotation_path` | `0` background, positive astrocyte IDs | Authoritative process-ownership supervision |
+| Compartments | `compartment_annotation_path` | `0` background, `1` nucleus, `2` soma, `3` process | Optional explicit compartment supervision |
 
 The nucleus instance mask is needed for **every image passed through the model**,
-including unlabeled images used only for prediction. An astrocyte annotation is
-needed only when the image is used for supervised training or evaluation.
+including unlabeled images used only for prediction. Complete-cell annotations are
+needed only for instance training and held-out evaluation.
 
 This means that it is normal to have:
 
 - nucleus masks for all usable images;
-- manually corrected astrocyte annotations for only a small subset;
-- no astrocyte annotation yet for most images.
+- complete-cell annotations for only a small subset;
+- binary or automatic proposals for more images;
+- no human astrocyte annotation yet for most images.
 
 `prepare_dataset.py` detects nuclei internally from DAPI and writes the resulting
 instance-label path to `cellpose_mask_path`. The column keeps its historical name
@@ -98,19 +107,19 @@ labels remain supported as an optional alternative.
 
 ### Files required by each operation
 
-| Operation | Microscopy TIFF | GFAP channel | Nucleus instance mask | Astrocyte annotation |
+| Operation | TIFF/GFAP | Nucleus IDs | Binary mask | Complete-cell IDs |
 |---|---:|---:|---:|---:|
-| Optional channel/QC export | Yes | Yes | Only for nucleus QC | No |
-| Supervised training | Yes | Yes | Yes | Yes |
-| Evaluation | Yes | Yes | Yes | Yes |
-| Standard prediction | Yes | Yes | Yes | No |
-| Pseudo-label generation | Yes | Yes | Yes | No |
-| Annotation import | Yes | Yes | No | Imported mask is the input |
+| Preparation/QC | Yes | Generated | No | No |
+| Binary bootstrap/training | Yes | Yes | Proposal/target | No |
+| Instance training | Yes | Yes | Derived/optional | **Yes** |
+| Trained instance prediction | Yes | Yes | No | No |
+| Instance evaluation | No | No | No | Prediction + human truth |
+| Complete-cell import | Yes | Yes | Derived automatically | Imported input |
 
 The DAPI channel is useful for inspection and QC, but it is not one of the three
 current model-input channels.
 
-## What one model sample contains
+## What one instance-model sample contains
 
 For one complete image, the input array has this channel-first shape:
 
@@ -124,35 +133,29 @@ For one complete image, the input array has this channel-first shape:
 | `1`: nucleus mask | `cellpose_labels > 0` | `{0, 1}` | Exact detected-nucleus locations |
 | `2`: nucleus proximity | Inverted, clipped Euclidean distance | `[0, 1]` | Smooth distance-to-nucleus context |
 
-The target is an integer array:
-
-```text
-[H, W]
-```
-
-The U-Net returns logits:
-
-```text
-[B, 2, H, W]
-```
-
-The dataset extracts matching spatial patches from the three-channel input and
-the target. One item returned by `AstrocyteDataset` is:
+`AstrocyteInstanceDataset` returns one image patch and all aligned supervision:
 
 ```python
 {
-    "image": torch.Tensor,          # [3, patch_H, patch_W], float32
-    "target": torch.Tensor,         # [patch_H, patch_W], int64
-    "image_id": str,                # original manifest identity
-    "coordinates": PatchCoordinates # y, x, height, width in the full image
+    "image": torch.Tensor,           # [3, H, W], float32
+    "targets": {
+        "semantic": torch.Tensor,    # [H, W], classes 0..3
+        "boundary": torch.Tensor,    # [H, W], classes 0/1
+        "offsets": torch.Tensor,     # [2, H, W], normalized dy/dx to owner nucleus
+        "offset_mask": torch.Tensor, # [H, W], regression support
+    },
+    "instances": torch.Tensor,       # [H, W], original cell IDs
+    "image_id": str,
+    "coordinates": PatchCoordinates,
 }
 ```
 
-Training constructs these arrays lazily from the paths in the manifest. The
+The model returns `semantic_logits [B,4,H,W]`, `boundary_logits [B,2,H,W]`, and
+`offsets [B,2,H,W]`. Training constructs targets lazily from the paths in the manifest. The
 intermediate files generated by `prepare_dataset.py`, `extract_channels.py`,
 `generate_nucleus_inputs.py`, and `create_patches.py` are useful for inspection,
-QC, and debugging. Training reads the generated instance-label path from the
-manifest but constructs the binary mask and proximity channel lazily.
+QC, and debugging. The old `AstrocyteDataset` and binary U-Net remain available
+for the foreground baseline.
 
 ## Repository structure
 
@@ -164,7 +167,8 @@ astrocytes_morphology_detection/
 |-- configs/
 |   |-- data.yaml
 |   |-- train_binary.yaml
-|   |-- train_multiclass.yaml
+|   |-- train_instances.yaml
+|   |-- train_multiclass.yaml        legacy semantic experiment scaffold
 |   `-- annotation_workflow.yaml
 |
 |-- data/
@@ -173,6 +177,7 @@ astrocytes_morphology_detection/
 |   |-- annotations/
 |   |   |-- originals/               archived human-exported masks
 |   |   |-- binary/                  derived binary training targets
+|   |   |-- compartment_originals/   preserved optional component labels
 |   |   `-- qc/                      annotation overlays
 |   `-- metadata/                    manifests, pair tables, patch queues
 |
@@ -193,7 +198,9 @@ astrocytes_morphology_detection/
 |-- notebooks/                       guided executable pipeline and QC workflow
 `-- outputs/
     |-- checkpoints/                 trained model states and histories
-    |-- predictions/                 normal model outputs
+    |-- predictions/                 binary semantic model outputs
+    |-- astrocyte_instances/         watershed bootstrap cell proposals
+    |-- instance_predictions/        trained ownership-model outputs
     |-- pseudo_labels/               automatic labels awaiting correction
     |-- metrics/                     evaluation CSV files
     `-- feature_tables/              preliminary quantitative summaries
@@ -212,13 +219,18 @@ astrocytes_morphology_detection/
 | `preprocessing/nuclei.py` | `validate_nucleus_labels`, `labels_to_binary_mask` | Checks exact image alignment and valid instance labels, then converts all positive nucleus IDs to foreground. |
 | `preprocessing/distance_maps.py` | `create_nucleus_proximity_map` | Converts the binary nucleus mask into a bounded distance-derived context channel. |
 | `preprocessing/patches.py` | `PatchCoordinates`, `generate_patch_coordinates`, `stitch_probability_patches` | Creates deterministic, border-covering patch coordinates and reconstructs complete probability maps by averaging overlaps. |
-| `datasets/astrocyte_dataset.py` | `prepare_model_inputs`, `AstrocyteDataset` | Filters manifest rows, validates every referenced file, builds the three channels, and returns aligned PyTorch patches. |
-| `models/unet.py` | `UNet` | Implements the compact encoder-decoder baseline with skip connections and equal input/output spatial size. |
-| `training/losses.py` | `DiceLoss`, `CrossEntropyDiceLoss` | Combines categorical cross-entropy with soft Dice overlap loss. Background is excluded from Dice by default. |
+| `datasets/astrocyte_dataset.py` | `prepare_model_inputs`, `AstrocyteDataset` | Builds the shared three inputs and serves the retained binary semantic baseline. |
+| `datasets/instance_dataset.py` | `AstrocyteInstanceDataset` | Validates complete-cell IDs, builds compartment/boundary/ownership targets, and extracts aligned patches. |
+| `models/unet.py` | `UNet`, `NucleusGuidedInstanceUNet` | Implements the retained semantic U-Net and final three-head instance model. |
+| `preprocessing/instance_targets.py` | `build_astrocyte_instance_targets` | Maps each complete cell to one nucleus and creates semantic, boundary, and offset supervision. |
+| `training/losses.py` | `CrossEntropyDiceLoss`, `NucleusGuidedInstanceLoss` | Optimizes compartment overlap, separation boundaries, and process-to-nucleus offsets jointly. |
+| `training/instance_trainer.py` | `train_instance_model` | Trains all heads, monitors validation Dice, checkpoints, and provides a synthetic smoke test. |
 | `training/trainer.py` | `train_model`, `run_overfit_smoke_test` | Runs AdamW optimization, validation, early stopping, checkpointing, history export, and a synthetic end-to-end diagnostic. |
 | `training/cross_validation.py` | `assign_grouped_folds`, `load_grouped_fold_manifests` | Assigns entire images or wells to deterministic folds and checks that no group leaks across train and validation. |
 | `training/metrics.py` | `metrics_from_predictions`, `metrics_from_probability_patches` | Computes finite Dice, IoU, precision, and recall after reconstructing complete images. |
-| `inference/predict_full_image.py` | `predict_full_image` | Predicts overlapping patches and averages softmax probabilities back into the original image dimensions. |
+| `inference/predict_instances.py` | `predict_instance_full_image` | Stitches semantic, boundary, and continuous ownership heads at full resolution. |
+| `postprocessing/astrocyte_instances.py` | `separate_astrocyte_instances` | Converts learned ownership votes and nucleus anchors into complete individual cell IDs. |
+| `training/instance_metrics.py` | `instance_segmentation_metrics`, `process_ownership_accuracy` | Measures cell detection/overlap and whether process pixels retain the correct owner. |
 | `annotations/workflow.py` | `import_annotation_pair` | Validates a human mask, archives its original bytes, converts it to binary, and produces a QC overlay and provenance record. |
 | `annotations/pseudo_labels.py` | `save_pseudo_label_artifacts` | Stores automatic probabilities, masks, and overlays under `outputs/`, separate from human annotations. |
 | `annotations/selection.py` | `select_uncertain_patches` | Scores candidate patches using normalized predictive entropy and creates a ranked correction queue. |
@@ -247,6 +259,7 @@ Imported human annotations are stored as:
 ```text
 data/annotations/originals/<image_id>/<status>_<content_hash>.<ext>
 data/annotations/binary/<image_id>_<status>_binary.tiff
+data/annotations/compartment_originals/<image_id>/<status>_<content_hash>.<ext>
 data/annotations/qc/<image_id>_<status>_annotation_overlay.png
 ```
 
@@ -256,6 +269,15 @@ Automatic pseudo labels are stored separately:
 outputs/pseudo_labels/probabilities/<image_id>.npy
 outputs/pseudo_labels/masks/<image_id>.tiff
 outputs/pseudo_labels/overlays/<image_id>.png
+```
+
+Automatic complete-cell outputs are also separate:
+
+```text
+outputs/astrocyte_instances/labels/           watershed bootstrap proposals
+outputs/instance_predictions/raw_heads/       learned probabilities and offsets
+outputs/instance_predictions/labels/          final automatic cell IDs
+outputs/instance_predictions/compartments/    automatic nucleus/soma/process IDs
 ```
 
 The project follows four preservation rules:
@@ -284,6 +306,8 @@ Every microscopy image has one row in a CSV manifest, normally
 | `dapi_channel` | Exact DAPI channel name | Before DAPI/QC export |
 | `cellpose_mask_path` | Active nucleus instance-label file; name retained for compatibility | Filled automatically by `prepare_dataset.py` |
 | `annotation_path` | Active binary astrocyte target or pseudo mask | Required when status is not `none` |
+| `instance_annotation_path` | Preserved human complete-cell ID mask | Required for final-model training |
+| `compartment_annotation_path` | Optional preserved 0/1/2/3 component mask | When compartments were annotated explicitly |
 | `annotation_status` | `none`, `seed`, `pseudo`, `corrected`, or `reviewed` | Always |
 | `annotation_source` | Human or model provenance | When an annotation exists |
 | `annotator` | Human annotator identifier | For human annotations when available |
@@ -297,9 +321,9 @@ preventing biological leakage and for later aggregation.
 Example:
 
 ```csv
-image_id,experiment_id,timepoint,treatment,magnification,path,gfap_channel,dapi_channel,cellpose_mask_path,annotation_path,annotation_status,annotation_source,annotator,review_status,split,well_id
-img_001,exp_A,day7,control,20x,data/raw/exp_A/img_001.ome.tif,GFAP,DAPI,data/interim/nucleus_labels/img_001.tiff,data/annotations/binary/img_001_seed_binary.tiff,seed,manual_cellpose_correction,AB,pending,train,A01
-img_002,exp_A,day7,control,20x,data/raw/exp_A/img_002.ome.tif,GFAP,DAPI,data/interim/nucleus_labels/img_002.tiff,,none,,,,test,A02
+image_id,path,gfap_channel,dapi_channel,cellpose_mask_path,annotation_path,instance_annotation_path,compartment_annotation_path,annotation_status,annotation_source,annotator,review_status,split,well_id
+img_001,data/raw/img_001.tif,GFAP,DAPI,data/interim/nucleus_labels/img_001.tiff,data/annotations/binary/img_001_seed_binary.tiff,data/annotations/originals/img_001/seed_abc.tiff,data/annotations/compartment_originals/img_001/seed_def.tiff,seed,manual_complete_cell_correction,AB,pending,train,A01
+img_002,data/raw/img_002.tif,GFAP,DAPI,data/interim/nucleus_labels/img_002.tiff,,,,none,,,,test,A02
 ```
 
 The code deliberately does not guess GFAP/DAPI identities, treatments, or groups
@@ -346,7 +370,8 @@ first be corrected/reviewed, or the user must explicitly change the configuratio
 
 ### What annotation import validates
 
-`import_existing_annotations.py` checks that:
+`import_existing_annotations.py` checks binary annotations. For final-task data,
+`import_instance_annotations.py` additionally checks that:
 
 - the image ID exists exactly once in the manifest;
 - the OME-TIFF and mask paths exist;
@@ -355,14 +380,18 @@ first be corrected/reviewed, or the user must explicitly change the configuratio
 - image and mask dimensions are identical;
 - mask labels are finite, non-negative, and integer-valued;
 - existing derived artifacts are not overwritten unless requested.
+- every positive astrocyte ID overlaps exactly one detected nucleus;
+- one nucleus is not assigned to several astrocyte IDs;
+- optional compartment values are only `0, 1, 2, 3` and stay inside their cell.
 
 Dimension equality is a necessary alignment check, but it cannot prove biological
 registration if the exported mask lacks complete spatial metadata. Always inspect
 the generated GFAP overlay.
 
-Instance-valued astrocyte masks are converted using `mask > 0`. The original
-instance-valued file is archived unchanged using a content hash, so instance IDs
-remain available for later work even though the current target is binary.
+Instance-valued astrocyte masks are converted using `mask > 0` only to preserve
+compatibility with the binary pipeline. The original instance IDs are archived
+unchanged and recorded in `instance_annotation_path`; those IDs are the actual
+supervision for complete-cell and process-ownership training.
 
 ## Preprocessing in detail
 
@@ -555,11 +584,40 @@ The fold algorithm:
 Each run saves `cross_validation_assignments.csv` with the effective image/group,
 fold, and split values. At least `n_splits` distinct non-empty groups are required.
 
-## Baseline model and training
+## Models and training
 
-### U-Net
+### Final nucleus-guided instance U-Net
 
-The implemented baseline is a compact 2D U-Net with:
+`configs/train_instances.yaml` defines the final-task model. A shared U-Net feature
+map feeds three heads:
+
+```text
+semantic head -> background / nucleus / soma / process
+boundary head -> interior / between-cell boundary
+offset head   -> normalized dy, dx from cell pixel to owning nucleus
+```
+
+The total objective is:
+
+```text
+L = semantic_weight * L_semantic
+  + boundary_weight * L_boundary
+  + offset_weight * SmoothL1(owner_offset)
+```
+
+The offset term is evaluated only on annotated cell pixels. Horizontal and
+vertical augmentation also changes the matching offset sign, so vector targets
+remain physically correct after flipping.
+
+At inference, offset endpoints vote for detected nucleus markers. Boundary-aware
+watershed fills only votes whose endpoint is unreliable. Before a trained instance
+checkpoint exists, the same postprocessor can run in `watershed_bootstrap` mode;
+that output is a pseudo proposal, not validated process ownership.
+
+### Retained binary U-Net
+
+The existing compact 2D U-Net remains useful for generating or learning a merged
+GFAP foreground mask. It has:
 
 - three encoder stages;
 - a bottleneck;
@@ -582,7 +640,7 @@ model:
 a model. A SegFormer entry exists as an explicit placeholder, but it is not
 implemented.
 
-### Loss
+### Binary loss
 
 The objective combines per-pixel categorical cross-entropy and soft Dice loss:
 
@@ -614,9 +672,9 @@ Training automatically uses CUDA when available; otherwise it runs on CPU.
 
 ### Data augmentation
 
-The current training augmentation is `RandomFlip`. It applies aligned horizontal
-and vertical flips to both input and target. Validation and evaluation do not use
-random augmentation.
+The binary path uses `RandomFlip`. The instance path uses `RandomInstanceFlip`,
+which also negates `dx` after a horizontal flip and `dy` after a vertical flip.
+Validation and evaluation never use random augmentation.
 
 ## Evaluation and inference
 
@@ -643,7 +701,7 @@ outputs/predictions/overlays/<image_id>.png       # GFAP + prediction QC
 
 ### Metrics
 
-The implemented metrics are:
+Semantic metrics are:
 
 - Dice score;
 - intersection over union (IoU);
@@ -657,6 +715,11 @@ Evaluation first reconstructs each complete image from its patches. Overlap pixe
 are therefore counted once, rather than receiving extra weight because they occur
 in multiple patches. The evaluation CSV contains one row per image and a final
 `__aggregate__` row containing the mean across images.
+
+Complete-cell evaluation additionally reports object precision/recall/F1 at a
+specified IoU, mean matched IoU, panoptic quality, and process ownership accuracy.
+Cells are matched one-to-one with Hungarian assignment, preventing one merged cell
+from receiving credit for several annotated astrocytes.
 
 ## Iterative seed-to-correction workflow
 
@@ -758,7 +821,107 @@ The second notebook replaced the historical
 `cellpose_mask_path` for compatibility, but the notebook supports both internally
 detected and externally supplied nucleus instance labels.
 
-## Complete command-line workflow
+## Complete-cell workflow: the final task
+
+The following is the shortest operational path from prepared images to true
+individual-astrocyte training.
+
+### 1. Prepare channels and nuclei automatically
+
+```powershell
+.\.python311\python.exe scripts\prepare_dataset.py
+.\.python311\python.exe scripts\generate_bootstrap_pseudo_labels.py --overwrite
+```
+
+### 2. Generate a bootstrap cell proposal for correction
+
+```powershell
+.\.python311\python.exe scripts\generate_astrocyte_instances.py --overwrite
+```
+
+This writes cell IDs, compartments, per-cell measurements, and two QC overlays to
+`outputs/astrocyte_instances/`. It uses nucleus-seeded watershed because no trained
+ownership checkpoint exists yet. Use it to start annotation; do not treat its
+process-to-cell assignments as ground truth.
+
+### 3. Correct complete cells, not only foreground
+
+In the annotation tool, every astrocyte must have a consistent positive ID across
+its nucleus, soma, and all visible processes. Different astrocytes must have
+different IDs. Export a 2D integer TIFF without resizing or interpolation.
+
+An optional second TIFF may explicitly mark compartments:
+
+```text
+0 background, 1 nucleus, 2 soma, 3 process
+```
+
+Create a pair table:
+
+```csv
+image_id,instance_mask_path,compartment_mask_path,annotation_status,annotator,review_status
+7d_453,exports/7d_453_cells.tiff,exports/7d_453_compartments.tiff,seed,AB,pending
+```
+
+Import it non-destructively:
+
+```powershell
+.\.python311\python.exe scripts\import_instance_annotations.py `
+  --manifest data/metadata/manifest.csv `
+  --pairs-csv data/metadata/instance_pairs.csv `
+  --output-manifest data/metadata/manifest_instances.csv `
+  --annotator AB
+```
+
+The importer derives the binary mask for compatibility, archives the exact source
+IDs, validates dimensions and cell-to-nucleus mapping, and generates cell-ID and
+compartment overlays.
+
+### 4. Train with grouped folds
+
+Point `configs/train_instances.yaml:data.manifest_path` at the new manifest. With
+several images from the same well, add a non-empty `well_id` column and set
+`cross_validation.group_column: well_id`. Otherwise leave `image_id`. Then run:
+
+```powershell
+# Engineering test that needs no real annotations
+.\.python311\python.exe scripts\train_instances.py --smoke-test
+
+# Real fold 0
+.\.python311\python.exe scripts\train_instances.py `
+  --config configs/train_instances.yaml `
+  --fold 0
+```
+
+Folds are assigned before patches are generated, so patches from one image/well
+cannot leak between training and validation. With fewer than the configured number
+of independent groups, reduce `n_splits`; do not split patches from one image to
+artificially create validation data.
+
+### 5. Predict individual cells with learned process ownership
+
+```powershell
+.\.python311\python.exe scripts\predict_astrocyte_instances.py `
+  --config configs/train_instances.yaml `
+  --checkpoint outputs/checkpoints/astrocyte_instances/best.pt `
+  --split test
+```
+
+The command saves raw model heads in addition to final labels and never populates
+human annotation columns. Correct selected automatic cell masks, import them as
+`corrected`, and retrain.
+
+### 6. Evaluate held-out complete cells
+
+```powershell
+.\.python311\python.exe scripts\evaluate_astrocyte_instances.py `
+  --manifest outputs/instance_predictions/manifest.csv
+```
+
+Process ownership accuracy requires explicit compartment annotations. Object
+precision/recall/F1 and panoptic quality require human complete-cell IDs.
+
+## Binary bootstrap and reference workflow
 
 The commands below assume they are run from the repository root.
 
@@ -1071,7 +1234,7 @@ same well must not be treated as independent biological replicates.
 
 ## Configuration reference
 
-The normal binary experiment is defined in `configs/train_binary.yaml`.
+The final complete-cell experiment is defined in `configs/train_instances.yaml`.
 
 ```yaml
 seed: 42
@@ -1088,32 +1251,32 @@ data:
     - reviewed
 
 model:
-  architecture: unet
+  architecture: nucleus_guided_instance_unet
   input_channels: 3
-  num_classes: 2
+  num_classes: 4
   base_channels: 32
 
 training:
   epochs: 100
-  batch_size: 8
+  batch_size: 4
   learning_rate: 0.0003
   weight_decay: 0.0001
   early_stopping_patience: 15
 
 loss:
-  cross_entropy_weight: 1.0
-  dice_weight: 1.0
-  include_background_in_dice: false
+  semantic_weight: 1.0
+  boundary_weight: 1.0
+  offset_weight: 2.0
 
 cross_validation:
-  enabled: false
+  enabled: true
   n_splits: 5
   validation_fold: 0
   group_column: image_id
-  fold_column: fold
+  fold_column: instance_fold
 
 output:
-  directory: outputs/checkpoints/binary_baseline
+  directory: outputs/checkpoints/astrocyte_instances
 ```
 
 ### Important settings
@@ -1126,18 +1289,20 @@ output:
 | `data.overlap` | Controls shared pixels between neighboring patches. Must be smaller than patch size. |
 | `data.num_workers` | Number of PyTorch data-loader worker processes. Use `0` when debugging. |
 | `data.max_nucleus_distance` | Distance in pixels at which the proximity channel reaches zero. |
+| `data.soma_radius` | Radius used only when explicit compartment labels are absent. |
+| `data.offset_scale` | Pixel scale used to normalize nucleus-directed ownership vectors. |
 | `data.train_annotation_statuses` | Explicit lifecycle states allowed into training/evaluation. |
-| `model.base_channels` | Width and approximate capacity/memory cost of the U-Net. |
+| `model.base_channels` | Width and approximate capacity/memory cost of the shared U-Net. |
+| `loss.offset_weight` | Importance of correct cell ownership along soma/process pixels. |
 | `training.batch_size` | Patches processed together; reduce it if GPU memory is insufficient. |
 | `training.early_stopping_patience` | Validation epochs without improvement before stopping. |
 | `cross_validation.group_column` | Unit that must remain intact across folds, such as `image_id` or `well_id`. |
 | `output.directory` | Destination for checkpoints, history, and fold assignments. |
 
-`configs/data.yaml` contains shared data defaults, and
+`configs/train_binary.yaml` retains the merged-foreground baseline. `configs/data.yaml` contains shared data defaults, and
 `configs/annotation_workflow.yaml` records human/pseudo output locations and
-selection defaults. `train_multiclass.yaml` is infrastructure for future work; it
-does not mean that a validated multiclass model or annotation set currently
-exists.
+selection defaults. `train_multiclass.yaml` is older semantic scaffolding; use
+`train_instances.yaml` for distinct complete cells.
 
 ## Script reference
 
@@ -1148,11 +1313,16 @@ exists.
 | `extract_channels.py` | Manifest and OME-TIFFs | GFAP/DAPI `.npy` files and previews | Makes channel selection easy to inspect. |
 | `generate_nucleus_inputs.py` | Manifest, images, existing nucleus labels | Binary masks, proximity maps, previews, montages | Validates nucleus alignment and visualizes the model inputs. |
 | `generate_bootstrap_pseudo_labels.py` | Manifest and GFAP channels | Heuristic probabilities, masks, overlays, report, separate pseudo manifest | Bootstraps proposals before a trained astrocyte checkpoint exists. |
+| `generate_astrocyte_instances.py` | Pseudo GFAP + nucleus IDs | Watershed cell proposals, compartments, overlays, measurements | Creates correction-ready bootstrap instances without claiming learned ownership. |
 | `create_patches.py` | Manifest images | Patch-index CSV | Records deterministic patch coordinates without copying pixel arrays. |
 | `import_existing_annotations.py` | Manifest and image-mask pair CSV | Archived originals, binary masks, QC overlays, new manifest | Adds seed/corrected/reviewed human targets non-destructively. |
+| `import_instance_annotations.py` | Manifest, complete-cell IDs, optional components | Preserved instance truth, derived binary mask, QC, new manifest | Validates one cell-to-one nucleus ownership for final-model training. |
 | `train.py` | YAML config and annotated manifest | Checkpoints, history, optional fold assignments | Trains the configured baseline or runs the synthetic smoke test. |
+| `train_instances.py` | Instance config and complete-cell annotations | Multi-head checkpoints, history, grouped assignments | Trains compartment, boundary, and ownership heads jointly. |
 | `evaluate.py` | Config, checkpoint, annotated split | Metrics CSV | Reconstructs complete images and reports segmentation metrics. |
 | `predict.py` | Config, checkpoint, selected split | Probabilities, TIFF masks, overlays | Runs standard full-image prediction. |
+| `predict_astrocyte_instances.py` | Instance checkpoint and selected split | Raw heads, individual cells, compartments, overlays, measurements | Runs learned complete-cell separation. |
+| `evaluate_astrocyte_instances.py` | Human and predicted instance paths | Object/ownership metric tables | Evaluates individual cells instead of only foreground pixels. |
 | `generate_pseudo_labels.py` | Config, checkpoint, `none` rows | Automatic artifacts and new pseudo manifest | Creates model labels without mixing them with human data. |
 | `select_unlabeled_patches.py` | Manifest and probability maps | Ranked annotation queue CSV | Finds high-entropy patches for manual work. |
 | `extract_features.py` | Predicted mask directory | Feature-table CSV | Creates preliminary field-level morphology summaries. |
@@ -1305,26 +1475,28 @@ decision.
 - Internal nucleus detection uses classical Otsu, distance peaks, and watershed; it
   is automatic but is not a neural network and must be validated on every new image
   condition.
-- Deep Watershed is not currently implemented. Adding it responsibly requires a
-  compatible pretrained model or manually validated nucleus instance masks; the
-  existing label-file interface is designed so such a model can replace the current
-  detector without changing downstream training.
 - Bootstrap GFAP masks are intensity-based heuristic proposals, not validated
   ground truth or neural-network predictions. They remain `pseudo` and are excluded
   from supervised training unless explicitly corrected or experimentally enabled.
 - External Cellpose labels remain supported, but Cellpose execution is not embedded.
-- The supported scientific target is binary GFAP-positive structure segmentation.
-- The multiclass configuration is future scaffolding, not a completed experiment.
+- The final architecture is implemented, but no trained instance checkpoint or
+  human complete-cell research dataset is bundled. Current `7d_453` cell separation
+  is therefore a watershed bootstrap, not validated learned process ownership.
+- In a two-dimensional image, truly overlapping processes can be intrinsically
+  ambiguous. The model can learn annotation conventions and image cues, but cannot
+  recover information absent from the acquisition; z-stacks or additional markers
+  may be needed for difficult crossings.
 - SegFormer is an explicit `NotImplementedError` placeholder.
 - No trained checkpoint or research dataset is bundled with the repository.
 - Prediction processes patches sequentially rather than in inference batches.
 - Checkpoints contain optimizer state, but there is no resume-training CLI yet.
 - Physical-unit conversion is not applied in the current feature-extraction script.
-- Connected components are not reliable individual-astrocyte identities.
-- Nucleus assignment, skeleton, branch, and endpoint outputs remain exploratory.
-- Notebook defaults demonstrate preprocessing, QC, automatic pseudo labeling, and
-  the synthetic training check; real training/evaluation remain gated until valid
-  human annotations, independent splits, and checkpoints exist.
+- Binary connected components are not reliable individual-astrocyte identities.
+  Use instance IDs from the final model and validate them on held-out corrections.
+- Per-cell skeleton, branch, and endpoint measurements remain exploratory until the
+  complete-cell masks and compartment definitions are biologically reviewed.
+- Notebook defaults demonstrate preparation and bootstrap separation; real learned
+  process ownership remains gated on human complete-cell annotations and independent folds.
 
 ## Development principles
 
