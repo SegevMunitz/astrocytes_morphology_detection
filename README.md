@@ -190,7 +190,7 @@ astrocytes_morphology_detection/
 |   `-- analysis/                    field and component measurements
 |
 |-- tests/                           synthetic regression tests
-|-- notebooks/                       space for exploratory notebooks
+|-- notebooks/                       guided executable pipeline and QC workflow
 `-- outputs/
     |-- checkpoints/                 trained model states and histories
     |-- predictions/                 normal model outputs
@@ -700,6 +700,17 @@ Activate it, then install the package and development dependencies:
 pip install -e ".[dev]"
 ```
 
+To run the guided notebooks, install the notebook dependencies as well:
+
+```bash
+pip install -e ".[dev,notebooks]"
+python -m jupyter lab
+```
+
+Select the kernel belonging to this environment. The notebooks also add the
+repository's `src/` directory explicitly, so they work when Jupyter starts from
+either the repository root or `notebooks/`.
+
 Confirm that the model, loss, optimizer, and backward pass work on a synthetic CPU
 example:
 
@@ -714,6 +725,29 @@ pytest
 ```
 
 No research images are required for either check.
+
+## Guided notebook workflow
+
+The notebooks are executable guides over the same tested modules and scripts used
+by the command-line workflow. They do not maintain a second implementation of the
+pipeline. Run them in numeric order:
+
+| Notebook | Purpose | Safe stopping point |
+|---|---|---|
+| `01_inspect_tiff_channels.ipynb` | Discover/load the manifest, inspect TIFF metadata and channels, run automatic preparation, and display its report and QC montage. | Prepared channels, nucleus labels, proximity maps, and manifest. |
+| `02_visualize_nucleus_masks.ipynb` | Validate label alignment, visualize nucleus boundaries, inspect instance sizes, and optionally compare detector parameters without overwriting files. | Accepted nucleus QC. |
+| `03_create_initial_annotations.ipynb` | Generate automatic GFAP bootstrap pseudo labels, inspect masks/confidence/overlays, compare thresholds, and optionally import a human-corrected mask. | Automatic `pseudo` mask, or an imported `corrected` target. |
+| `04_evaluate_baseline.ipynb` | Audit training readiness, inspect the U-Net contract, run the synthetic smoke test, and optionally train, evaluate, and predict. | Smoke-test success until enough human-validated images exist. |
+
+Only edit cells labeled **User settings**. Expensive or scientifically gated steps
+use explicit Boolean switches such as `RUN_REAL_TRAINING`; executing all cells with
+their defaults is safe for the current single test image. Automatic predictions
+remain `pseudo` and are not converted into trusted training targets by a notebook.
+
+The second notebook replaced the historical
+`02_visualize_cellpose_masks.ipynb` name. The active manifest column remains
+`cellpose_mask_path` for compatibility, but the notebook supports both internally
+detected and externally supplied nucleus instance labels.
 
 ## Complete command-line workflow
 
@@ -1279,7 +1313,9 @@ decision.
 - Physical-unit conversion is not applied in the current feature-extraction script.
 - Connected components are not reliable individual-astrocyte identities.
 - Nucleus assignment, skeleton, branch, and endpoint outputs remain exploratory.
-- Notebooks are currently placeholders for project-specific exploration.
+- Notebook defaults demonstrate preprocessing, QC, automatic pseudo labeling, and
+  the synthetic training check; real training/evaluation remain gated until valid
+  human annotations, independent splits, and checkpoints exist.
 
 ## Development principles
 

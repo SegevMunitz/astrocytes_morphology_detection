@@ -26,6 +26,12 @@ dependencies = [
 dev = [
     "pytest>=7.4",
 ]
+notebooks = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -34,4 +40,3 @@ where = ["src"]
 addopts = "-ra"
 testpaths = ["tests"]
 pythonpath = ["src"]
-
