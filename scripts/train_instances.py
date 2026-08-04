@@ -161,6 +161,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--fold", type=int)
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--smoke-steps", type=int, default=20)
     return parser.parse_args()
@@ -183,6 +185,12 @@ def main() -> None:
     if args.fold is not None:
         configuration.setdefault("cross_validation", {})["enabled"] = True
         configuration["cross_validation"]["validation_fold"] = args.fold
+    if args.epochs is not None:
+        if args.epochs <= 0:
+            raise SystemExit("--epochs must be positive")
+        configuration["training"]["epochs"] = args.epochs
+    if args.output_dir is not None:
+        configuration["output"]["directory"] = str(args.output_dir)
     history = train_from_configuration(configuration)
     print(f"Completed {len(history)} instance-training epoch(s)")
 

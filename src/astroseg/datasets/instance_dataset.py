@@ -104,8 +104,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
         self.offset_scale = offset_scale
         self.augmentation = augmentation
         self._records: list[dict[str, Any]] = []
-        self._cache_index: int | None = None
-        self._cache_value: tuple[np.ndarray, AstrocyteInstanceTargets] | None = None
+        self._record_cache: dict[int, tuple[np.ndarray, AstrocyteInstanceTargets]] = {}
 
         for row_index, row in self.manifest.iterrows():
             for field in ("path", "gfap_channel", "cellpose_mask_path", "instance_annotation_path"):
@@ -130,7 +129,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
             cells = _load_2d_array(instance_path)
             compartments = _load_2d_array(compartment_path) if compartment_path else None
             validate_nucleus_labels(nuclei, microscopy.image.shape[-2:])
-            build_astrocyte_instance_targets(
+            targets = build_astrocyte_instance_targets(
                 cells,
                 nuclei,
                 compartments,
@@ -138,9 +137,16 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
                 offset_scale=offset_scale,
                 max_nucleus_distance=max_nucleus_distance,
             )
+            inputs = prepare_model_inputs(
+                microscopy,
+                str(row["gfap_channel"]),
+                nuclei,
+                max_nucleus_distance,
+            )
             coordinates = generate_patch_coordinates(
                 microscopy.image.shape[-2:], patch_size, overlap
             )
+            record_index = len(self._records)
             self._records.append(
                 {
                     "row_index": row_index,
@@ -151,6 +157,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
                     "coordinates": coordinates,
                 }
             )
+            self._record_cache[record_index] = (inputs, targets)
         self._patch_index = [
             (record_index, coordinate)
             for record_index, record in enumerate(self._records)
@@ -165,37 +172,12 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
         return len(self._patch_index)
 
     def _load_record(self, record_index: int) -> tuple[np.ndarray, AstrocyteInstanceTargets]:
-        """Load and cache one complete input/target record for adjacent patches.
+        """Return one precomputed full-image input/target record.
 
-        Target construction occurs before cropping so nucleus-directed offsets use
-        full-image coordinates consistently across overlapping patches.
+        Every selected image is cached once during initialization. Random patch
+        shuffling therefore cannot repeatedly reload and rebuild 2048-pixel data.
         """
-        if self._cache_index == record_index and self._cache_value is not None:
-            return self._cache_value
-        record = self._records[record_index]
-        row = self.manifest.iloc[record["row_index"]]
-        microscopy = load_ome_tiff(record["image_path"])
-        nuclei = _load_2d_array(record["nucleus_path"])
-        cells = _load_2d_array(record["instance_path"])
-        compartments = (
-            _load_2d_array(record["compartment_path"])
-            if record["compartment_path"] is not None
-            else None
-        )
-        inputs = prepare_model_inputs(
-            microscopy, str(row["gfap_channel"]), nuclei, self.max_nucleus_distance
-        )
-        targets = build_astrocyte_instance_targets(
-            cells,
-            nuclei,
-            compartments,
-            soma_radius=self.soma_radius,
-            offset_scale=self.offset_scale,
-            max_nucleus_distance=self.max_nucleus_distance,
-        )
-        self._cache_index = record_index
-        self._cache_value = (inputs, targets)
-        return inputs, targets
+        return self._record_cache[record_index]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """Return one image patch and its complete multi-head supervision mapping.

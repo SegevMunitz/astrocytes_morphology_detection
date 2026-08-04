@@ -7,6 +7,7 @@ import pandas as pd
 import tifffile
 import torch
 
+from astroseg.annotations import import_astrocyte_instance_pair
 from astroseg.constants import MANIFEST_COLUMNS
 from astroseg.datasets import AstrocyteInstanceDataset, RandomInstanceFlip
 from astroseg.models import NucleusGuidedInstanceUNet
@@ -111,6 +112,39 @@ def test_instance_dataset_loads_aligned_complete_cell_targets(tmp_path: Path) ->
     assert item["targets"]["semantic"].shape == (16, 16)
     assert item["targets"]["offsets"].shape == (2, 16, 16)
     assert item["instances"].dtype == torch.int64
+
+
+def test_cellpose_instance_import_writes_plain_training_tiff(tmp_path: Path) -> None:
+    """Pickled Cellpose sources must not become dataset training paths.
+
+    The original dictionary remains archived, while the normalized instance path
+    is a non-pickled 2D TIFF that the training dataset can load safely.
+    """
+    cells, nuclei, _ = _two_cell_labels()
+    image_path = tmp_path / "image.ome.tiff"
+    nucleus_path = tmp_path / "nuclei.tiff"
+    cellpose_path = tmp_path / "image_seg.npy"
+    tifffile.imwrite(
+        image_path,
+        np.stack(((cells > 0).astype(np.uint8), (nuclei > 0).astype(np.uint8))),
+        ome=True,
+        metadata={"axes": "CYX", "Channel": {"Name": ["GFAP", "DAPI"]}},
+    )
+    tifffile.imwrite(nucleus_path, nuclei)
+    np.save(cellpose_path, {"masks": cells, "outlines": cells > 0}, allow_pickle=True)
+
+    result = import_astrocyte_instance_pair(
+        "image",
+        image_path,
+        nucleus_path,
+        cellpose_path,
+        "GFAP",
+        tmp_path / "annotations",
+    )
+
+    assert result.base.original_mask_path.suffix == ".npy"
+    assert result.instance_mask_path.suffix == ".tiff"
+    np.testing.assert_array_equal(tifffile.imread(result.instance_mask_path), cells)
 
 
 def test_instance_training_never_selects_reserved_test_images(tmp_path: Path) -> None:

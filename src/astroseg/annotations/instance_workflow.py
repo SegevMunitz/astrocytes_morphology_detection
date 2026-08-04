@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 
 import numpy as np
+import tifffile
 
 from astroseg.annotations.workflow import (
     AnnotationImportResult,
@@ -20,10 +21,10 @@ from astroseg.visualization import save_compartment_overlay, save_instance_overl
 
 @dataclass(frozen=True)
 class InstanceAnnotationImportResult:
-    """Preserved instance data, derived binary mask, QC, and provenance.
+    """Preserved source, normalized training labels, QC, and provenance.
 
-    The archived full-cell instance mask is the authoritative training target.
-    Optional compartment labels are preserved separately without relabeling.
+    Cellpose dictionaries remain in ``base.original_mask_path`` for provenance,
+    while ``instance_mask_path`` is always a safe plain 2D TIFF for training.
     """
 
     base: AnnotationImportResult
@@ -76,13 +77,14 @@ def import_astrocyte_instance_pair(
 
     destination = Path(output_directory)
     status = annotation_status.strip().lower()
+    normalized_instance = destination / "instances" / f"{image_id}_{status}_instances.tiff"
     instance_overlay = destination / "qc" / f"{image_id}_{status}_instance_ids.png"
     compartment_overlay = (
         destination / "qc" / f"{image_id}_{status}_compartments.png"
         if compartments is not None
         else None
     )
-    extra_destinations = [instance_overlay]
+    extra_destinations = [normalized_instance, instance_overlay]
     if compartment_overlay is not None:
         extra_destinations.append(compartment_overlay)
     existing = [path for path in extra_destinations if path.exists()]
@@ -100,6 +102,12 @@ def import_astrocyte_instance_pair(
         annotator,
         review_status,
         overwrite,
+    )
+    normalized_instance.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(
+        normalized_instance,
+        instances.astype(np.uint32, copy=False),
+        photometric="minisblack",
     )
     gfap = get_channel(microscopy, gfap_channel)
     instance_overlay.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +130,7 @@ def import_astrocyte_instance_pair(
         save_compartment_overlay(gfap, compartments, compartment_overlay)
     return InstanceAnnotationImportResult(
         base=base,
-        instance_mask_path=base.original_mask_path,
+        instance_mask_path=normalized_instance,
         compartment_mask_path=archived_compartment,
         instance_overlay_path=instance_overlay,
         compartment_overlay_path=compartment_overlay,
