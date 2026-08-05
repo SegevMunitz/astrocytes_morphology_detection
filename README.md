@@ -179,6 +179,53 @@ seed masks -> initial training -> predictions on unlabeled images
            -> manual correction -> corrected/reviewed import -> retraining
 ```
 
+### Cellpose fine-tuning
+
+Cellpose fine-tuning is a separate, simpler workflow for establishing a strong
+instance-segmentation baseline. It does not replace the nucleus-guided U-Net above.
+Each training image must be beside its Cellpose GUI annotation and share its base
+name:
+
+```text
+~/astroseg_data/training_images/
+    BMP4_24h_20x_20240307_145.tif
+    BMP4_24h_20x_20240307_145_seg.npy
+```
+
+`prepare_cellpose_training_data.py` checks that each pair exists, has identical
+spatial dimensions, contains integer instance IDs, and uses the expected channels.
+It creates symlinks for a run and never changes the original image or annotation.
+Cellpose trains from the final `masks` array: the GUI's `ismanual` field records
+provenance but does not include, exclude, or weight a cell during training.
+
+Create the isolated Cellpose 3 environment once, then submit a single baseline:
+
+```bash
+cd ~/astrocytes_morphology_detection
+export ASTROSEG_DATA_ROOT="$HOME/astroseg_data"
+mkdir -p cluster_logs
+sbatch scripts/slurm_setup_cellpose3.sh
+sbatch scripts/slurm_train_cellpose3.sh
+```
+
+For comparable learning-rate experiments, the committed lists in
+`configs/cellpose_split/` keep whole images in either training or validation. The
+two arrays cover `cyto2_cp3` and `cyto3`; each task uses one A100 GPU and writes its
+log, checkpoints, loss history, and run metadata inside its own result folder:
+
+```bash
+sbatch scripts/slurm_sweep_cellpose_lr.sh       # LR: 0.02, 0.05, 0.1, 0.2
+sbatch scripts/slurm_extend_cellpose_lr.sh      # LR: 0.25 through 0.5
+
+python scripts/summarize_cellpose_sweep.py \
+  --sweep-dir "$ASTROSEG_DATA_ROOT/outputs/cellpose/lr_sweeps/lr_sweep_replicate_split"
+```
+
+The ranked `summary.csv` reports the best saved checkpoint for each run. Validation
+loss is useful for comparing runs made with the same split, but it is not a final
+biological-quality score; inspect overlays and report held-out instance metrics
+before using a model for scientific conclusions.
+
 ### Current baseline status
 
 The present nucleus-guided U-Net has 1.93 million trainable parameters. Grouped
