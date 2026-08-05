@@ -37,19 +37,21 @@ Git contains only code, configuration, tests, and notebooks. Large microscopy
 images, masks, intermediate arrays, checkpoints, and predictions are intentionally
 excluded by `.gitignore`.
 
-The current dataset is stored in this
-[Google Drive folder](https://drive.google.com/drive/folders/15FrdmbZGEWyB2mBgGv2hVpIlkcGQy6tE):
+The operational dataset now lives on the HUJI ELSC filesystem under the account
+that submits the Slurm jobs:
 
-| Drive folder | Content |
-|---|---|
-| `Astrocytes Training Photos` | ten annotated training images |
-| `Astrocytes Training Masks/Astrocytes Final Masks` | matching `*_seg.npy` masks |
-| `Astrocytes Morphology Photos` | images reserved for prediction |
-| `Astroseg Outputs` | generated QC, annotations, models, and predictions |
+```text
+~/astroseg_data/
+    training_images/       original annotated microscopy images
+    training_masks/        original Cellpose/manual *_seg.npy files
+    test_images/           images reserved for prediction
+    outputs/               manifests, QC, annotations, checkpoints, predictions
+```
 
-Public folder identifiers are documented in `configs/google_drive.yaml`; Google
-credentials must never be committed. During a run, files live under the ignored
-`.astroseg_runtime/` directory and can be deleted and downloaded again safely.
+Set `ASTROSEG_DATA_ROOT` when using another location. Cluster YAML files expand
+that variable at runtime, so neither the repository nor its manifests require a
+Google Drive mount, rclone, or embedded account path. The original Drive folder
+is retained as a migration source/backup only; cluster execution does not access it.
 
 ## Installation
 
@@ -62,66 +64,47 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,notebooks]"
 ```
 
-The Drive automation also requires [rclone](https://rclone.org/downloads/). After
-installing it, create a Google Drive remote once:
+## Run on the HUJI cluster
 
-```powershell
-rclone config
+The cluster copy of the repository already uses a Python 3.11 environment. For a
+new clone, create or update it once through the CPU queue:
+
+```bash
+cd ~/astrocytes_morphology_detection
+mkdir -p cluster_logs
+sbatch scripts/slurm_setup.sh
 ```
 
-Choose `New remote`, name it `astroseg-drive`, choose Google Drive, and complete
-the browser sign-in. Do not copy OAuth tokens into this repository.
+Prepare the migrated manifest once, then submit grouped cross-validation. Every
+fold receives one GPU; `%3` limits the array to three concurrent GPUs:
 
-rclone currently warns that its shared Google client ID is being retired during
-2026. The authorized remote works now, but configure a private Google client ID
-in rclone before that shared client is disabled.
-
-## Run the complete Drive workflow
-
-From the repository root, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_drive_pipeline.ps1 `
-  -Annotator "your-name"
+```bash
+cd ~/astrocytes_morphology_detection
+export ASTROSEG_DATA_ROOT="$HOME/astroseg_data"
+bash scripts/prepare_cluster_storage.sh
+sbatch --array=0-4%3 scripts/slurm_train_instances.sh
 ```
 
-That single command performs the operational workflow:
+After selecting a checkpoint, predict all reserved test images with one GPU:
 
-1. downloads training images, masks, and test images from Drive;
-2. creates a manifest with explicit `train` and `test` rows;
-3. selects GFAP/DAPI channels and detects nuclei automatically;
-4. validates and imports the training instance masks without changing originals;
-5. trains fold 0 with grouped cross-validation;
-6. predicts individual astrocytes on every test image;
-7. compresses the complete `.astroseg_runtime/outputs` tree and uploads a dated
-   `.tar.zst` archive to `Astroseg Outputs`.
-
-Use `-Fold 1` (through `-Fold 4`) to train another validation fold. Use
-`-SkipDownload` when the input files are already synchronized, or `-SkipUpload`
-when testing locally. Training can take a long time; a CUDA-capable GPU is strongly
-recommended.
-
-The synchronization operations can also be run separately:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action Download
-powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action Upload
-powershell -ExecutionPolicy Bypass -File scripts/sync_google_drive.ps1 -Action UploadExpanded
+```bash
+export ASTROSEG_CHECKPOINT="$ASTROSEG_DATA_ROOT/outputs/checkpoints/cross_validation/fold_1/best.pt"
+export ASTROSEG_RUN_NAME="review_round_1"
+sbatch --export=ALL,ASTROSEG_DATA_ROOT,ASTROSEG_CHECKPOINT,ASTROSEG_RUN_NAME \
+  scripts/slurm_predict_instances.sh
 ```
 
-`Upload` creates a compact dated backup archive. `UploadExpanded` places every
-generated file into its matching `metadata/`, `interim/`, `annotations/`,
-`checkpoints/`, or `instance_predictions/` Drive subfolder.
+All artifacts remain under `~/astroseg_data/outputs`. Human annotations and
+automatic predictions are always separate, and no command uploads to Drive.
 
 ## Output layout
 
 ```text
-.astroseg_runtime/
-    dataset/                         downloaded inputs; never modified
-        training_images/
-        training_masks/
-        test_images/
-    outputs/                         uploaded to Drive after a run
+~/astroseg_data/
+    training_images/                 original inputs; never modified
+    training_masks/                  preserved source masks
+    test_images/                     prediction-only images
+    outputs/
         metadata/                    manifests and split assignments
         interim/                     channels, nuclei, distance maps, QC
         annotations/                 preserved imports and derived masks
@@ -135,12 +118,9 @@ generated file into its matching `metadata/`, `interim/`, `annotations/`,
 ```
 
 Human annotations and automatic predictions are deliberately stored separately.
-Predictions never overwrite reviewed masks.
-
-The upload command archives the full tree because the uncompressed intermediate
-arrays are several gigabytes and contain hundreds of small files. Extract an
-archive with `tar --zstd -xf <archive-name>.tar.zst`; its top-level directory is
-`outputs/`. The local temporary archive is removed only after a successful upload.
+Predictions never overwrite reviewed masks. `manifest_instances_cluster.csv`
+contains validated absolute cluster paths; the original imported manifest remains
+unchanged for provenance.
 
 ## Annotation contract
 
@@ -177,8 +157,9 @@ fields are:
 
 ## Training and validation
 
-The Drive workflow uses `configs/train_instances_drive.yaml`. The standard local
-template remains in `configs/train_instances.yaml`.
+Slurm uses `configs/train_instances_cluster.yaml`, whose storage paths come from
+`ASTROSEG_DATA_ROOT`. The standard local template remains in
+`configs/train_instances.yaml`.
 
 Because there are only ten labeled images, cross-validation is grouped before
 patch extraction. All patches from the same image remain in one fold. If several
@@ -198,10 +179,24 @@ seed masks -> initial training -> predictions on unlabeled images
            -> manual correction -> corrected/reviewed import -> retraining
 ```
 
+### Current baseline status
+
+The present nucleus-guided U-Net has 1.93 million trainable parameters. Grouped
+five-fold validation on the ten annotated images produced mean semantic Dice
+`0.813` and mean boundary Dice `0.203`. It is therefore a useful annotation
+bootstrap model, but cell separation and process ownership are not yet validated
+well enough for final scientific measurements.
+
+The architecture is intentionally unchanged during the storage migration. A
+larger U-Net or transformer would add capacity while the supervision set remains
+only ten images, increasing overfitting risk without addressing inconsistent or
+ambiguous process ownership. Reconsider architecture complexity after adding
+diverse corrected instances and measuring held-out instance F1/panoptic quality.
+
 ## Repository map
 
 ```text
-configs/                 local and Drive-backed pipeline settings
+configs/                 local and cluster-native pipeline settings
 src/astroseg/io/         BMP/TIFF/OME-TIFF and manifest loading
 src/astroseg/preprocessing/ channels, nuclei, patches, instance targets
 src/astroseg/datasets/   aligned semantic and instance datasets
@@ -210,7 +205,7 @@ src/astroseg/training/   losses, metrics, grouped folds, trainers
 src/astroseg/inference/  patch and full-image prediction
 src/astroseg/postprocessing/ complete-cell reconstruction
 src/astroseg/analysis/   per-cell morphology measurements
-scripts/                 command-line and Drive workflows
+scripts/                 command-line and Slurm workflows
 notebooks/               guided execution and learning
 tests/                   synthetic regression tests
 ```
@@ -230,8 +225,9 @@ targets, model heads, losses, ownership offsets, object metrics, and notebooks.
 
 ## Current limitations
 
-- No validated trained checkpoint is committed; it must be learned from the Drive
-  annotations.
+- Checkpoints are stored on the cluster rather than committed to Git. The current
+  five-fold model is a baseline trained from only ten annotated images; it is not
+  yet sufficient for final biological conclusions.
 - DAPI nucleus detection is automatic but classical and should be checked in QC
   when staining, magnification, or acquisition changes.
 - Process crossings may be inherently ambiguous in 2D; some cases require a

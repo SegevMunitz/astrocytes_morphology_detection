@@ -8,12 +8,17 @@ import numpy as np
 import pandas as pd
 import tifffile
 import torch
-import yaml
 
 from astroseg.analysis import astrocyte_instance_morphology
 from astroseg.datasets import prepare_model_inputs
 from astroseg.inference import predict_instance_full_image
-from astroseg.io import get_channel, load_manifest, load_ome_tiff, validate_manifest
+from astroseg.io import (
+    get_channel,
+    load_manifest,
+    load_ome_tiff,
+    load_yaml_configuration,
+    validate_manifest,
+)
 from astroseg.models import build_model
 from astroseg.postprocessing import separate_astrocyte_instances
 from astroseg.training.checkpoints import load_checkpoint
@@ -25,11 +30,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
     Invalid roots fail before loading large image data or allocating a model.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
-    if not isinstance(value, dict):
-        raise ValueError("Configuration must be a YAML mapping")
-    return value
+    return load_yaml_configuration(path)
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:

@@ -6,10 +6,10 @@ from typing import Any
 
 import pandas as pd
 import torch
-import yaml
 from torch.utils.data import DataLoader
 
 from astroseg.datasets import AstrocyteDataset, collate_segmentation_batch
+from astroseg.io import load_yaml_configuration
 from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
 from astroseg.models import build_model
 from astroseg.training.checkpoints import load_checkpoint
@@ -23,11 +23,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     The helper preserves nested values for model and data construction and rejects
     non-mapping YAML documents before checkpoint or dataset access.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
-    if not isinstance(value, dict):
-        raise ValueError("Configuration must be a YAML mapping")
-    return value
+    return load_yaml_configuration(path)
 
 
 def evaluate_checkpoint(

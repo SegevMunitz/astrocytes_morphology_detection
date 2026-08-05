@@ -6,12 +6,11 @@ from typing import Any
 
 import pandas as pd
 import torch
-import yaml
 from torch.utils.data import DataLoader
 
 from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
 from astroseg.datasets import AstrocyteInstanceDataset, RandomInstanceFlip, collate_instance_batch
-from astroseg.io import load_manifest
+from astroseg.io import load_manifest, load_yaml_configuration
 from astroseg.models import build_model
 from astroseg.training import (
     NucleusGuidedInstanceLoss,
@@ -29,16 +28,9 @@ def load_configuration(path: Path) -> dict[str, Any]:
     Detailed values are validated by datasets, model, loss, and trainer constructors,
     keeping the YAML loader focused on structural errors and readable messages.
     """
-    if not path.is_file():
-        raise FileNotFoundError(f"Configuration does not exist: {path}")
-    with path.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
-    if not isinstance(value, dict):
-        raise ValueError("Instance training configuration must be a YAML mapping")
-    for section in ("data", "model", "training", "loss", "output"):
-        if not isinstance(value.get(section), dict):
-            raise ValueError(f"Configuration is missing mapping section {section!r}")
-    return value
+    return load_yaml_configuration(
+        path, required_sections=("data", "model", "training", "loss", "output")
+    )
 
 
 def _eligible_instance_rows(

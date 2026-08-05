@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import yaml
 import pandas as pd
 from torch.utils.data import DataLoader
 
 from astroseg.datasets import AstrocyteDataset, RandomFlip, collate_segmentation_batch
+from astroseg.io import load_yaml_configuration
 from astroseg.models import build_model
 from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
 from astroseg.training import (
@@ -27,16 +27,9 @@ def load_configuration(path: Path) -> dict[str, Any]:
     Required data, model, training, loss, and output sections must be mappings.
     Detailed numeric and dataset validation occurs when their components are built.
     """
-    if not path.is_file():
-        raise FileNotFoundError(f"Configuration does not exist: {path}")
-    with path.open("r", encoding="utf-8") as handle:
-        configuration = yaml.safe_load(handle)
-    if not isinstance(configuration, dict):
-        raise ValueError("Training configuration must be a YAML mapping")
-    for section in ("data", "model", "training", "loss", "output"):
-        if section not in configuration or not isinstance(configuration[section], dict):
-            raise ValueError(f"Training configuration is missing mapping section {section!r}")
-    return configuration
+    return load_yaml_configuration(
+        path, required_sections=("data", "model", "training", "loss", "output")
+    )
 
 
 def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, float | int]]:

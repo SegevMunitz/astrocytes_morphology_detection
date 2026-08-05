@@ -16,3 +16,6 @@ venv/
 data/
 outputs/
 .astroseg_runtime/
+.astroseg_migration/
+cluster_logs/*.out
+cluster_logs/*.err

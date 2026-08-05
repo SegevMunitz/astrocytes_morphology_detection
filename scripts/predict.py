@@ -7,11 +7,10 @@ from typing import Any
 import numpy as np
 import tifffile
 import torch
-import yaml
 
 from astroseg.datasets import prepare_model_inputs
 from astroseg.inference import predict_full_image
-from astroseg.io import get_channel, load_manifest, load_ome_tiff
+from astroseg.io import get_channel, load_manifest, load_ome_tiff, load_yaml_configuration
 from astroseg.models import build_model
 from astroseg.training.checkpoints import load_checkpoint
 from astroseg.visualization import save_segmentation_overlay
@@ -23,11 +22,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     Model shape and patching settings are consumed from this mapping; invalid
     document roots fail before loading a potentially incompatible checkpoint.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
-    if not isinstance(value, dict):
-        raise ValueError("Configuration must be a YAML mapping")
-    return value
+    return load_yaml_configuration(path)
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:
