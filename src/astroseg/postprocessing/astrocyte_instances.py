@@ -23,6 +23,7 @@ class AstrocyteInstanceResult:
     cell_to_nucleus: dict[int, int]
     cell_count: int
     active_nucleus_count: int
+    rejected_nucleus_count: int
     unassigned_foreground_fraction: float
     ownership_mode: str
 
@@ -48,6 +49,8 @@ def _active_nucleus_markers(
     nucleus_labels: np.ndarray,
     foreground: np.ndarray,
     max_distance: float,
+    support_expansion: int,
+    min_foreground_fraction: float,
 ) -> tuple[np.ndarray, dict[int, int]]:
     """Create sequential markers for nuclei supported by nearby GFAP foreground.
 
@@ -60,7 +63,16 @@ def _active_nucleus_markers(
     next_cell = 1
     for nucleus_id in np.unique(nucleus_labels[nucleus_labels > 0]):
         nucleus_mask = nucleus_labels == nucleus_id
-        if float(distance_to_foreground[nucleus_mask].min()) <= max_distance:
+        support = (
+            nucleus_mask
+            if support_expansion == 0
+            else ndi.binary_dilation(nucleus_mask, iterations=support_expansion)
+        )
+        foreground_fraction = float(foreground[support].mean())
+        if (
+            float(distance_to_foreground[nucleus_mask].min()) <= max_distance
+            and foreground_fraction >= min_foreground_fraction
+        ):
             markers[nucleus_mask] = next_cell
             cell_to_nucleus[next_cell] = int(nucleus_id)
             next_cell += 1
@@ -82,6 +94,8 @@ def separate_astrocyte_instances(
     soma_radius: float = 20.0,
     min_cell_area: int = 50,
     min_gfap_area: int = 20,
+    nucleus_support_expansion: int = 4,
+    min_nucleus_foreground_fraction: float = 0.0,
 ) -> AstrocyteInstanceResult:
     """Assign soma and processes to nuclei and return individual cell instances.
 
@@ -114,12 +128,20 @@ def separate_astrocyte_instances(
         raise ValueError("Distance and offset parameters must be finite and positive")
     if soma_expansion < 0 or min_cell_area <= 0 or min_gfap_area <= 0:
         raise ValueError("Expansion must be non-negative and area thresholds positive")
+    if nucleus_support_expansion < 0:
+        raise ValueError("nucleus_support_expansion must be non-negative")
+    if not 0.0 <= min_nucleus_foreground_fraction <= 1.0:
+        raise ValueError("min_nucleus_foreground_fraction must be in [0, 1]")
 
     foreground = probability >= foreground_threshold
     if not foreground.any():
         raise ValueError("Cell probability produced an empty astrocyte foreground")
     markers, preliminary_mapping = _active_nucleus_markers(
-        nuclei, foreground, max_nucleus_to_gfap_distance
+        nuclei,
+        foreground,
+        max_nucleus_to_gfap_distance,
+        nucleus_support_expansion,
+        min_nucleus_foreground_fraction,
     )
     if not preliminary_mapping:
         raise ValueError("No detected nucleus is sufficiently close to GFAP foreground")
@@ -210,6 +232,8 @@ def separate_astrocyte_instances(
         cell_to_nucleus=cell_to_nucleus,
         cell_count=len(cell_to_nucleus),
         active_nucleus_count=len(preliminary_mapping),
+        rejected_nucleus_count=int(np.unique(nuclei[nuclei > 0]).size)
+        - len(preliminary_mapping),
         unassigned_foreground_fraction=float(unassigned.sum() / foreground.sum()),
         ownership_mode=ownership_mode,
     )

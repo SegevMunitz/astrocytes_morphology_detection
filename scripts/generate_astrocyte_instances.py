@@ -58,6 +58,8 @@ def generate_astrocyte_instances(
     soma_radius: float = 20.0,
     min_cell_area: int = 50,
     min_gfap_area: int = 20,
+    nucleus_support_expansion: int = 4,
+    min_nucleus_foreground_fraction: float = 0.0,
 ) -> pd.DataFrame:
     """Generate nucleus-owned bootstrap instances for every manifest image.
 
@@ -115,6 +117,8 @@ def generate_astrocyte_instances(
             nuclei,
             foreground_threshold=foreground_threshold,
             max_nucleus_to_gfap_distance=max_nucleus_to_gfap_distance,
+            nucleus_support_expansion=nucleus_support_expansion,
+            min_nucleus_foreground_fraction=min_nucleus_foreground_fraction,
             soma_expansion=soma_expansion,
             soma_radius=soma_radius,
             min_cell_area=min_cell_area,
@@ -157,6 +161,7 @@ def generate_astrocyte_instances(
                 "image_id": image_id,
                 "cell_count": result.cell_count,
                 "active_nucleus_count": result.active_nucleus_count,
+                "rejected_nucleus_count": result.rejected_nucleus_count,
                 "unassigned_foreground_fraction": result.unassigned_foreground_fraction,
                 "ownership_mode": result.ownership_mode,
                 "instance_path": _portable_path(label_path),
@@ -200,6 +205,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--foreground-threshold", type=float, default=0.5)
     parser.add_argument("--max-nucleus-to-gfap-distance", type=float, default=16.0)
+    parser.add_argument("--nucleus-support-expansion", type=int, default=4)
+    parser.add_argument(
+        "--min-nucleus-foreground-fraction", type=float, default=0.0
+    )
     parser.add_argument("--soma-expansion", type=int, default=4)
     parser.add_argument("--soma-radius", type=float, default=20.0)
     parser.add_argument("--min-cell-area", type=int, default=50)
@@ -226,6 +235,8 @@ def main() -> None:
         args.soma_radius,
         args.min_cell_area,
         args.min_gfap_area,
+        args.nucleus_support_expansion,
+        args.min_nucleus_foreground_fraction,
     )
     report = pd.read_csv(args.output_dir / "instance_report.csv")
     print(

@@ -6,6 +6,7 @@ import argparse
 import itertools
 import json
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -66,6 +67,11 @@ def _restore_model(
     return model, configuration
 
 
+def _restore_configuration(checkpoint_path: Path) -> dict[str, Any]:
+    """Load only the recorded configuration when raw predictions are reused."""
+    return load_checkpoint(checkpoint_path, torch.device("cpu"))["configuration"]
+
+
 def _predict_row(
     row: pd.Series,
     model: torch.nn.Module,
@@ -102,6 +108,8 @@ def _separate(
     foreground_threshold: float,
     boundary_threshold: float,
     max_nucleus_distance: float | None = None,
+    min_nucleus_foreground_fraction: float | None = None,
+    nucleus_support_expansion: int | None = None,
 ) -> AstrocyteInstanceResult:
     """Apply a candidate threshold pair while retaining configured geometry."""
     data = configuration["data"]
@@ -118,6 +126,16 @@ def _separate(
             max_nucleus_distance
             if max_nucleus_distance is not None
             else postprocessing.get("max_nucleus_to_gfap_distance", 16)
+        ),
+        nucleus_support_expansion=int(
+            nucleus_support_expansion
+            if nucleus_support_expansion is not None
+            else postprocessing.get("nucleus_support_expansion", 4)
+        ),
+        min_nucleus_foreground_fraction=float(
+            min_nucleus_foreground_fraction
+            if min_nucleus_foreground_fraction is not None
+            else postprocessing.get("min_nucleus_foreground_fraction", 0)
         ),
         offset_scale=float(postprocessing.get("offset_scale", data.get("offset_scale", 256))),
         max_offset_endpoint_distance=float(
@@ -155,6 +173,14 @@ def evaluate_cross_validation(
     run_directory: Path,
     output_directory: Path,
     tuning_image_ids: set[str] | None = None,
+    *,
+    raw_heads_directory: Path | None = None,
+    foreground_thresholds: Sequence[float] = (0.35, 0.45, 0.55, 0.65),
+    boundary_thresholds: Sequence[float] = (0.35, 0.50, 0.65),
+    max_nucleus_distances: Sequence[float] = (8.0, 16.0, 32.0),
+    min_nucleus_foreground_fractions: Sequence[float] = (0.0,),
+    nucleus_support_expansion: int = 4,
+    checkpoint_name: str = "best.pt",
 ) -> pd.DataFrame:
     """Generate OOF heads, tune thresholds, and aggregate object-level metrics.
 
@@ -168,24 +194,55 @@ def evaluate_cross_validation(
     examples: list[dict[str, Any]] = []
     threshold_settings = list(
         itertools.product(
-            (0.35, 0.45, 0.55, 0.65),
-            (0.35, 0.50, 0.65),
-            (8.0, 16.0, 32.0),
+            foreground_thresholds,
+            boundary_thresholds,
+            max_nucleus_distances,
+            min_nucleus_foreground_fractions,
         )
     )
+    if not threshold_settings:
+        raise ValueError("Postprocessing threshold grid cannot be empty")
+    if any(not 0.0 <= value <= 1.0 for value in foreground_thresholds):
+        raise ValueError("foreground_thresholds must be in [0, 1]")
+    if any(not 0.0 <= value <= 1.0 for value in boundary_thresholds):
+        raise ValueError("boundary_thresholds must be in [0, 1]")
+    if any(value <= 0 for value in max_nucleus_distances):
+        raise ValueError("max_nucleus_distances must be positive")
+    if any(not 0.0 <= value <= 1.0 for value in min_nucleus_foreground_fractions):
+        raise ValueError("min_nucleus_foreground_fractions must be in [0, 1]")
+    if nucleus_support_expansion < 0:
+        raise ValueError("nucleus_support_expansion must be non-negative")
     for fold_directory in sorted(run_directory.glob("fold_*")):
         assignments_path = fold_directory / "cross_validation_assignments.csv"
-        checkpoint_path = fold_directory / "best.pt"
+        checkpoint_path = fold_directory / checkpoint_name
         if not assignments_path.is_file() or not checkpoint_path.is_file():
             continue
-        model, configuration = _restore_model(checkpoint_path, device)
+        model = None
+        if raw_heads_directory is None:
+            model, configuration = _restore_model(checkpoint_path, device)
+        else:
+            configuration = _restore_configuration(checkpoint_path)
         assignments = pd.read_csv(assignments_path, dtype=str, keep_default_na=False)
         held_out = assignments.loc[assignments["split"] == "val"]
         for _, row in held_out.iterrows():
             image_id = str(row["image_id"])
-            heads, nuclei = _predict_row(row, model, configuration, device)
-            head_path = output_directory / "raw_heads" / f"{image_id}.npz"
-            _save_heads(head_path, heads)
+            nuclei = _load_labels(str(row["cellpose_mask_path"]))
+            if raw_heads_directory is None:
+                assert model is not None
+                heads, predicted_nuclei = _predict_row(
+                    row, model, configuration, device
+                )
+                if not np.array_equal(nuclei, predicted_nuclei):
+                    raise ValueError(f"Nucleus inputs changed for {image_id!r}")
+                head_path = output_directory / "raw_heads" / f"{image_id}.npz"
+                _save_heads(head_path, heads)
+            else:
+                head_path = raw_heads_directory / f"{image_id}.npz"
+                if not head_path.is_file():
+                    raise FileNotFoundError(
+                        f"Saved raw heads do not exist for {image_id!r}: {head_path}"
+                    )
+                heads = _load_heads(head_path)
             target = _load_labels(str(row["instance_annotation_path"]))
             examples.append(
                 {
@@ -201,6 +258,7 @@ def evaluate_cross_validation(
                 foreground_threshold,
                 boundary_threshold,
                 max_nucleus_distance,
+                min_nucleus_foreground_fraction,
             ) in threshold_settings:
                 error = ""
                 try:
@@ -211,6 +269,8 @@ def evaluate_cross_validation(
                         foreground_threshold,
                         boundary_threshold,
                         max_nucleus_distance,
+                        min_nucleus_foreground_fraction,
+                        nucleus_support_expansion,
                     )
                     prediction = separated.labels
                 except ValueError as exception:
@@ -225,12 +285,17 @@ def evaluate_cross_validation(
                         "foreground_threshold": foreground_threshold,
                         "boundary_threshold": boundary_threshold,
                         "max_nucleus_to_gfap_distance": max_nucleus_distance,
+                        "min_nucleus_foreground_fraction": (
+                            min_nucleus_foreground_fraction
+                        ),
+                        "nucleus_support_expansion": nucleus_support_expansion,
                         **metrics,
                         "postprocessing_error": error,
                     }
                 )
-        del model
-        if device.type == "cuda":
+        if model is not None:
+            del model
+        if raw_heads_directory is None and device.type == "cuda":
             torch.cuda.empty_cache()
     if not examples:
         raise ValueError(f"No complete held-out folds found in {run_directory}")
@@ -250,6 +315,8 @@ def evaluate_cross_validation(
                 "foreground_threshold",
                 "boundary_threshold",
                 "max_nucleus_to_gfap_distance",
+                "min_nucleus_foreground_fraction",
+                "nucleus_support_expansion",
             ]
         )[
             ["f1", "panoptic_quality", "precision", "recall"]
@@ -263,6 +330,8 @@ def evaluate_cross_validation(
     best_foreground = float(best["foreground_threshold"])
     best_boundary = float(best["boundary_threshold"])
     best_nucleus_distance = float(best["max_nucleus_to_gfap_distance"])
+    best_nucleus_fraction = float(best["min_nucleus_foreground_fraction"])
+    best_support_expansion = int(best["nucleus_support_expansion"])
 
     records: list[dict[str, Any]] = []
     for example in examples:
@@ -276,6 +345,8 @@ def evaluate_cross_validation(
             best_foreground,
             best_boundary,
             best_nucleus_distance,
+            best_nucleus_fraction,
+            best_support_expansion,
         )
         prediction_path = output_directory / "labels" / f"{example['image_id']}.tiff"
         prediction_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +365,7 @@ def evaluate_cross_validation(
                     **metrics,
                     "predicted_count": separated.cell_count,
                     "active_nucleus_count": separated.active_nucleus_count,
+                    "rejected_nucleus_count": separated.rejected_nucleus_count,
                     "unassigned_foreground_fraction": separated.unassigned_foreground_fraction,
                     "prediction_path": str(prediction_path.resolve()),
                 }
@@ -312,6 +384,7 @@ def evaluate_cross_validation(
     summary.to_csv(output_directory / "metrics_summary.csv")
     metadata = {
         "run_directory": str(run_directory.resolve()),
+        "checkpoint_name": checkpoint_name,
         "held_out_images": sorted(available_ids),
         "folds": sorted(result["fold"].unique().tolist()),
         "device": str(device),
@@ -322,6 +395,8 @@ def evaluate_cross_validation(
         "best_foreground_threshold": best_foreground,
         "best_boundary_threshold": best_boundary,
         "best_max_nucleus_to_gfap_distance": best_nucleus_distance,
+        "best_min_nucleus_foreground_fraction": best_nucleus_fraction,
+        "best_nucleus_support_expansion": best_support_expansion,
         "best_tuning_mean_f1": float(best["f1"]),
         "best_tuning_mean_panoptic_quality": float(best["panoptic_quality"]),
     }
@@ -331,12 +406,50 @@ def evaluate_cross_validation(
     return result
 
 
+def _parse_float_values(value: str) -> tuple[float, ...]:
+    """Parse a non-empty comma-separated finite threshold list."""
+    try:
+        values = tuple(float(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exception:
+        raise argparse.ArgumentTypeError(f"Invalid numeric list: {value!r}") from exception
+    if not values or not np.isfinite(values).all():
+        raise argparse.ArgumentTypeError("Threshold lists must be non-empty and finite")
+    return values
+
+
 def parse_args() -> argparse.Namespace:
     """Parse completed fold directory, tuning subset, and output destination."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tuning-image-list", type=Path)
+    parser.add_argument(
+        "--raw-heads-dir",
+        type=Path,
+        help="Reuse saved full-image heads instead of running the model again",
+    )
+    parser.add_argument(
+        "--foreground-thresholds",
+        type=_parse_float_values,
+        default=(0.35, 0.45, 0.55, 0.65),
+    )
+    parser.add_argument(
+        "--boundary-thresholds",
+        type=_parse_float_values,
+        default=(0.35, 0.50, 0.65),
+    )
+    parser.add_argument(
+        "--max-nucleus-distances",
+        type=_parse_float_values,
+        default=(8.0, 16.0, 32.0),
+    )
+    parser.add_argument(
+        "--min-nucleus-foreground-fractions",
+        type=_parse_float_values,
+        default=(0.0,),
+    )
+    parser.add_argument("--nucleus-support-expansion", type=int, default=4)
+    parser.add_argument("--checkpoint-name", default="best.pt")
     return parser.parse_args()
 
 
@@ -344,7 +457,18 @@ def main() -> None:
     """Evaluate all available folds and print the IoU-0.5 mean scores."""
     args = parse_args()
     result = evaluate_cross_validation(
-        args.run_dir, args.output_dir, _read_ids(args.tuning_image_list)
+        args.run_dir,
+        args.output_dir,
+        _read_ids(args.tuning_image_list),
+        raw_heads_directory=args.raw_heads_dir,
+        foreground_thresholds=args.foreground_thresholds,
+        boundary_thresholds=args.boundary_thresholds,
+        max_nucleus_distances=args.max_nucleus_distances,
+        min_nucleus_foreground_fractions=(
+            args.min_nucleus_foreground_fractions
+        ),
+        nucleus_support_expansion=args.nucleus_support_expansion,
+        checkpoint_name=args.checkpoint_name,
     )
     mean = result.loc[result["iou_threshold"] == 0.5, ["f1", "panoptic_quality"]].mean()
     print(

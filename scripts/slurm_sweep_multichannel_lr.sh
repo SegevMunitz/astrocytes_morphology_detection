@@ -2,12 +2,12 @@
 #SBATCH --job-name=astroseg-lr-sweep
 #SBATCH --partition=gpu.q
 #SBATCH --qos=gpu-qos
-#SBATCH --constraint=rtxpro
+#SBATCH --constraint=teslaV100S|A100|rtxpro
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
-#SBATCH --array=0-6
+#SBATCH --array=0-5
 #SBATCH --output=cluster_logs/%x_%A_%a.out
 #SBATCH --error=cluster_logs/%x_%A_%a.err
 
@@ -28,11 +28,11 @@ export MPLBACKEND=Agg
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export PYTHONUNBUFFERED=1
 
-learning_rates=(0.1 0.15 0.2 0.25 0.3 0.35 0.4)
+learning_rates=(0.001 0.002 0.003 0.005 0.0075 0.01)
 learning_rate="${learning_rates[${SLURM_ARRAY_TASK_ID}]}"
 slug="${learning_rate/./p}"
 epochs="${ASTROSEG_EPOCHS:-100}"
-run_name="${ASTROSEG_RUN_NAME:-multichannel_lr_sweep_20260816}"
+run_name="${ASTROSEG_RUN_NAME:-multichannel_lr_sweep_0p001_0p01_20260816}"
 output_dir="${data_root}/outputs/checkpoints/${run_name}/lr_${slug}/fold_cellpose_split"
 
 echo "Starting fixed-LR run: learning_rate=${learning_rate}, output=${output_dir}"

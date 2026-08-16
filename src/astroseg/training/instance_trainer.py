@@ -2,6 +2,7 @@
 
 import csv
 import copy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,31 @@ from astroseg.preprocessing import build_astrocyte_instance_targets
 from astroseg.training.checkpoints import save_checkpoint
 from astroseg.training.losses import NucleusGuidedInstanceLoss
 from astroseg.training.metrics import metrics_from_logits
+
+
+@dataclass(frozen=True)
+class InstanceEpochMetrics:
+    """Averages needed to diagnose and select an instance-training checkpoint."""
+
+    total_loss: float
+    semantic_dice: float
+    boundary_dice: float
+    consistency_loss: float
+    semantic_loss: float
+    boundary_loss: float
+    offset_loss: float
+
+    def __getitem__(self, index: int) -> float:
+        """Retain index access for existing smoke-test reporting."""
+        return (
+            self.total_loss,
+            self.semantic_dice,
+            self.boundary_dice,
+            self.consistency_loss,
+            self.semantic_loss,
+            self.boundary_loss,
+            self.offset_loss,
+        )[index]
 
 
 def _move_targets(
@@ -50,7 +76,7 @@ def run_instance_epoch(
     gradient_scaler: torch.amp.GradScaler | None = None,
     mixed_precision: bool = False,
     auxiliary_dropout_probability: float = 0.0,
-) -> tuple[float, float, float, float]:
+) -> InstanceEpochMetrics:
     """Run one train or validation epoch for all three prediction heads.
 
     Mean joint loss, foreground-compartment Dice, and boundary Dice are returned.
@@ -62,6 +88,9 @@ def run_instance_epoch(
     total_semantic_dice = 0.0
     total_boundary_dice = 0.0
     total_consistency = 0.0
+    total_semantic_loss = 0.0
+    total_boundary_loss = 0.0
+    total_offset_loss = 0.0
     batches = 0
     unlabeled_iterator = iter(unlabeled_loader) if unlabeled_loader is not None else None
     for batch in tqdm(data_loader, desc="train" if training else "val", leave=False):
@@ -75,7 +104,8 @@ def run_instance_epoch(
             enabled=mixed_precision and device.type == "cuda",
         ):
             outputs = model(images)
-            loss = criterion(outputs, targets)
+            loss_components = criterion.components(outputs, targets)
+            loss = loss_components["total"]
             consistency = torch.zeros((), device=device)
             if (
                 training
@@ -145,6 +175,9 @@ def run_instance_epoch(
                                 student_parameter, alpha=1.0 - ema_decay
                             )
         total_loss += float(loss.detach().cpu())
+        total_semantic_loss += float(loss_components["semantic"].detach().cpu())
+        total_boundary_loss += float(loss_components["boundary"].detach().cpu())
+        total_offset_loss += float(loss_components["offset"].detach().cpu())
         total_consistency += float(consistency.detach().cpu())
         total_semantic_dice += metrics_from_logits(
             outputs["semantic_logits"].detach(), targets["semantic"]
@@ -155,11 +188,14 @@ def run_instance_epoch(
         batches += 1
     if batches == 0:
         raise ValueError("Data loader produced no instance batches")
-    return (
-        total_loss / batches,
-        total_semantic_dice / batches,
-        total_boundary_dice / batches,
-        total_consistency / batches,
+    return InstanceEpochMetrics(
+        total_loss=total_loss / batches,
+        semantic_dice=total_semantic_dice / batches,
+        boundary_dice=total_boundary_dice / batches,
+        consistency_loss=total_consistency / batches,
+        semantic_loss=total_semantic_loss / batches,
+        boundary_loss=total_boundary_loss / batches,
+        offset_loss=total_offset_loss / batches,
     )
 
 
@@ -240,21 +276,56 @@ def train_instance_model(
         )
         row: dict[str, float | int] = {
             "epoch": epoch,
-            "train_loss": train_values[0],
-            "train_semantic_dice": train_values[1],
-            "train_boundary_dice": train_values[2],
-            "train_consistency_loss": train_values[3],
+            "train_loss": train_values.total_loss,
+            "train_semantic_loss": train_values.semantic_loss,
+            "train_boundary_loss": train_values.boundary_loss,
+            "train_offset_loss": train_values.offset_loss,
+            "train_semantic_dice": train_values.semantic_dice,
+            "train_boundary_dice": train_values.boundary_dice,
+            "train_consistency_loss": train_values.consistency_loss,
             "consistency_weight": consistency_weight if unlabeled_loader is not None else 0.0,
             "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            "validation_loss": validation_values[0],
-            "validation_semantic_dice": validation_values[1],
-            "validation_boundary_dice": validation_values[2],
+            "validation_loss": validation_values.total_loss,
+            "validation_semantic_loss": validation_values.semantic_loss,
+            "validation_boundary_loss": validation_values.boundary_loss,
+            "validation_offset_loss": validation_values.offset_loss,
+            "validation_semantic_dice": validation_values.semantic_dice,
+            "validation_boundary_dice": validation_values.boundary_dice,
         }
         history.append(row)
-        metric = validation_values[1]
+        checkpoint_metric = str(
+            training.get("checkpoint_metric", "validation_joint_dice")
+        )
+        available_metrics = {
+            "validation_semantic_dice": validation_values.semantic_dice,
+            "validation_boundary_dice": validation_values.boundary_dice,
+            "validation_joint_dice": (
+                validation_values.semantic_dice + validation_values.boundary_dice
+            )
+            / 2.0,
+        }
+        if checkpoint_metric not in available_metrics:
+            raise ValueError(
+                f"Unknown training.checkpoint_metric {checkpoint_metric!r}; "
+                f"expected one of {sorted(available_metrics)}"
+            )
+        metric = available_metrics[checkpoint_metric]
+        row["checkpoint_metric"] = metric
         if scheduler is not None:
             scheduler.step(metric)
         save_checkpoint(destination / "last.pt", model, optimizer, epoch, metric, configuration)
+        save_every = int(training.get("save_every", 10))
+        if save_every <= 0:
+            raise ValueError("training.save_every must be positive")
+        if epoch % save_every == 0 or epoch == int(training["epochs"]):
+            save_checkpoint(
+                destination / f"epoch_{epoch:04d}.pt",
+                model,
+                optimizer,
+                epoch,
+                metric,
+                configuration,
+            )
         if metric > best_metric:
             best_metric = metric
             without_improvement = 0

@@ -26,6 +26,8 @@ training:
   learning_rate: 0.0003
   weight_decay: 0.0001
   early_stopping_patience: 15
+  checkpoint_metric: validation_joint_dice
+  save_every: 10
 
 loss:
   semantic_weight: 1.0
@@ -44,6 +46,8 @@ postprocessing:
   foreground_threshold: 0.5
   boundary_threshold: 0.5
   max_nucleus_to_gfap_distance: 16.0
+  nucleus_support_expansion: 4
+  min_nucleus_foreground_fraction: 0.0
   offset_scale: 256.0
   max_offset_endpoint_distance: 32.0
   soma_expansion: 4

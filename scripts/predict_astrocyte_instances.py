@@ -156,6 +156,12 @@ def predict_split(
             max_nucleus_to_gfap_distance=float(
                 postprocessing.get("max_nucleus_to_gfap_distance", 16)
             ),
+            nucleus_support_expansion=int(
+                postprocessing.get("nucleus_support_expansion", 4)
+            ),
+            min_nucleus_foreground_fraction=float(
+                postprocessing.get("min_nucleus_foreground_fraction", 0)
+            ),
             offset_scale=float(postprocessing.get("offset_scale", data.get("offset_scale", 256))),
             max_offset_endpoint_distance=float(
                 postprocessing.get("max_offset_endpoint_distance", 32)
@@ -205,6 +211,7 @@ def predict_split(
                 "image_id": image_id,
                 "cell_count": result.cell_count,
                 "active_nucleus_count": result.active_nucleus_count,
+                "rejected_nucleus_count": result.rejected_nucleus_count,
                 "unassigned_foreground_fraction": result.unassigned_foreground_fraction,
                 "ownership_mode": result.ownership_mode,
                 "ensemble_size": len(models),
@@ -263,6 +270,14 @@ def main() -> None:
         if "best_max_nucleus_to_gfap_distance" in evaluation:
             postprocessing["max_nucleus_to_gfap_distance"] = float(
                 evaluation["best_max_nucleus_to_gfap_distance"]
+            )
+        if "best_min_nucleus_foreground_fraction" in evaluation:
+            postprocessing["min_nucleus_foreground_fraction"] = float(
+                evaluation["best_min_nucleus_foreground_fraction"]
+            )
+        if "best_nucleus_support_expansion" in evaluation:
+            postprocessing["nucleus_support_expansion"] = int(
+                evaluation["best_nucleus_support_expansion"]
             )
     manifest = predict_split(
         configuration,

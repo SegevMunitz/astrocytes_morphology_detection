@@ -133,6 +133,14 @@ class NucleusGuidedInstanceLoss(nn.Module):
         Expected keys are explicit so an ordinary semantic model or incomplete
         target dictionary cannot be trained accidentally under the instance task.
         """
+        return self.components(outputs, targets)["total"]
+
+    def components(
+        self,
+        outputs: dict[str, torch.Tensor],
+        targets: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Return weighted total and unweighted per-head losses for diagnostics."""
         output_keys = {"semantic_logits", "boundary_logits", "offsets"}
         target_keys = {"semantic", "boundary", "offsets", "offset_mask"}
         missing_outputs = output_keys - set(outputs)
@@ -155,8 +163,14 @@ class NucleusGuidedInstanceLoss(nn.Module):
         expanded_mask = offset_mask.unsqueeze(1).expand_as(per_value)
         denominator = expanded_mask.sum().clamp_min(1.0)
         offset = (per_value * expanded_mask).sum() / denominator
-        return (
+        total = (
             self.semantic_weight * semantic
             + self.boundary_weight * boundary
             + self.offset_weight * offset
         )
+        return {
+            "total": total,
+            "semantic": semantic,
+            "boundary": boundary,
+            "offset": offset,
+        }

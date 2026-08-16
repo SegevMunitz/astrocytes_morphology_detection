@@ -13,6 +13,7 @@ import tifffile
 import torch
 from cellpose import io, models
 
+from astroseg.models import prepare_three_channel_cellpose_image
 from astroseg.training import instance_segmentation_metrics
 
 
@@ -49,6 +50,8 @@ def evaluate_cellpose(
     checkpoint: Path,
     output_directory: Path,
     channels: tuple[int, int] = (1, 3),
+    input_channels: int = 2,
+    zero_auxiliary: bool = False,
 ) -> pd.DataFrame:
     """Tune standard Cellpose thresholds and report held-out object metrics.
 
@@ -59,12 +62,25 @@ def evaluate_cellpose(
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for Cellpose evaluation")
     images = [io.imread(str(_find_image(image_directory, image_id))) for image_id in image_ids]
+    evaluation_channels: list[int] | None = list(channels)
+    channel_axis: int | None = None
+    if input_channels == 3:
+        images = [prepare_three_channel_cellpose_image(value) for value in images]
+        if zero_auxiliary:
+            for image in images:
+                image[1] = 0
+        evaluation_channels = None
+        channel_axis = 0
+    elif input_channels != 2:
+        raise ValueError("input_channels must be 2 or 3")
     targets = []
     for image_id in image_ids:
         path = mask_directory / f"{image_id}_seg.npy"
         payload = np.load(path, allow_pickle=True).item()
         targets.append(np.asarray(payload["masks"]))
-    model = models.CellposeModel(gpu=True, pretrained_model=str(checkpoint))
+    model = models.CellposeModel(
+        gpu=True, pretrained_model=str(checkpoint), nchan=input_channels
+    )
     records: list[dict[str, float | int | str]] = []
     predictions_by_setting: dict[tuple[float, float], list[np.ndarray]] = {}
     for flow_threshold, cell_probability in itertools.product(
@@ -72,7 +88,8 @@ def evaluate_cellpose(
     ):
         predicted, _, _ = model.eval(
             images,
-            channels=list(channels),
+            channels=evaluation_channels,
+            channel_axis=channel_axis,
             diameter=None,
             flow_threshold=flow_threshold,
             cellprob_threshold=cell_probability,
@@ -119,7 +136,11 @@ def evaluate_cellpose(
     metadata = {
         "checkpoint": str(checkpoint.resolve()),
         "image_ids": image_ids,
-        "channels": list(channels),
+        "channels": (
+            ["GFAP", "GFP", "DAPI"] if input_channels == 3 else list(channels)
+        ),
+        "input_channels": input_channels,
+        "zero_auxiliary": zero_auxiliary,
         "selection_scope": "thresholds tuned on held-out validation masks",
         "best_flow_threshold": setting[0],
         "best_cellprob_threshold": setting[1],
@@ -142,6 +163,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--chan", type=int, default=1)
     parser.add_argument("--chan2", type=int, default=3)
+    parser.add_argument("--input-channels", type=int, choices=(2, 3), default=2)
+    parser.add_argument(
+        "--zero-auxiliary",
+        action="store_true",
+        help="Zero GFP during three-channel evaluation to simulate GFP-missing test data",
+    )
     return parser.parse_args()
 
 
@@ -155,6 +182,8 @@ def main() -> None:
         args.checkpoint,
         args.output_dir,
         (args.chan, args.chan2),
+        args.input_channels,
+        args.zero_auxiliary,
     )
     summary = result.groupby(["flow_threshold", "cellprob_threshold"])[
         ["f1", "panoptic_quality"]

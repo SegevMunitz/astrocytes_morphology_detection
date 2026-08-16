@@ -343,6 +343,49 @@ def test_learned_offsets_assign_long_processes_to_their_nuclei() -> None:
     assert result.ownership_mode == "learned_offsets_with_watershed_fallback"
 
 
+def test_nucleus_support_filter_rejects_a_nucleus_near_only_sparse_foreground() -> None:
+    """A nearby process pixel must not turn every DAPI nucleus into an astrocyte."""
+    shape = (32, 32)
+    yy, xx = np.indices(shape)
+    nuclei = np.zeros(shape, dtype=np.uint16)
+    nuclei[(yy - 10) ** 2 + (xx - 9) ** 2 <= 1] = 11
+    nuclei[(yy - 10) ** 2 + (xx - 24) ** 2 <= 1] = 22
+    probability = np.zeros(shape, dtype=np.float32)
+    probability[(yy - 10) ** 2 + (xx - 9) ** 2 <= 5**2] = 1
+    probability[10, 19:22] = 1
+
+    result = separate_astrocyte_instances(
+        probability,
+        nuclei,
+        foreground_threshold=0.5,
+        max_nucleus_to_gfap_distance=4,
+        nucleus_support_expansion=3,
+        min_nucleus_foreground_fraction=0.2,
+        soma_expansion=1,
+        min_cell_area=1,
+        min_gfap_area=1,
+    )
+
+    assert result.active_nucleus_count == 1
+    assert result.rejected_nucleus_count == 1
+    assert result.cell_to_nucleus == {1: 11}
+
+
+def test_nucleus_support_filter_validates_coverage_parameters() -> None:
+    """Invalid support controls should fail before reconstruction starts."""
+    probability = np.ones((8, 8), dtype=np.float32)
+    nuclei = np.zeros((8, 8), dtype=np.uint16)
+    nuclei[3, 3] = 1
+    with pytest.raises(ValueError, match="nucleus_support_expansion"):
+        separate_astrocyte_instances(
+            probability, nuclei, nucleus_support_expansion=-1
+        )
+    with pytest.raises(ValueError, match="min_nucleus_foreground_fraction"):
+        separate_astrocyte_instances(
+            probability, nuclei, min_nucleus_foreground_fraction=1.1
+        )
+
+
 def test_instance_metrics_penalize_wrong_process_owner() -> None:
     """Object overlap and process ownership are evaluated as distinct outcomes.
 

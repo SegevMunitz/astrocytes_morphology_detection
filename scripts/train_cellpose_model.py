@@ -11,6 +11,38 @@ import numpy as np
 import torch
 from cellpose import io, models, train
 
+from astroseg.models import (
+    expand_cellpose_input_weights,
+    prepare_three_channel_cellpose_image,
+)
+
+
+def _load_source_model(value: str) -> models.CellposeModel:
+    """Load either a built-in model name or an exact trained Cellpose checkpoint."""
+    path = Path(value)
+    if path.is_file():
+        return models.CellposeModel(gpu=True, pretrained_model=str(path))
+    return models.CellposeModel(gpu=True, model_type=value)
+
+
+def _build_three_channel_model(
+    value: str,
+) -> tuple[models.CellposeModel, tuple[str, ...]]:
+    """Expand a two-channel Cellpose model without perturbing its old channels."""
+    source = _load_source_model(value)
+    diameter = float(source.net.diam_mean.detach().cpu().item())
+    target = models.CellposeModel(
+        gpu=True,
+        pretrained_model=False,
+        nchan=3,
+        diam_mean=diameter,
+    )
+    converted, expanded_keys = expand_cellpose_input_weights(
+        source.net.state_dict(), target.net.state_dict()
+    )
+    target.net.load_state_dict(converted, strict=True)
+    return target, expanded_keys
+
 
 def parse_args() -> argparse.Namespace:
     """Parse reproducible optimization, data, and output parameters."""
@@ -28,6 +60,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--chan", type=int, default=1)
     parser.add_argument("--chan2", type=int, default=3)
+    parser.add_argument(
+        "--three-channel-transfer",
+        action="store_true",
+        help="Expand the pretrained model to GFAP/GFP/DAPI instead of selecting two RGB channels",
+    )
+    parser.add_argument(
+        "--auxiliary-dropout-probability", type=float, choices=(0.0, 0.5), default=0.5
+    )
+    parser.add_argument("--optimizer", choices=("sgd", "adamw"), default="sgd")
     return parser.parse_args()
 
 
@@ -52,22 +93,44 @@ def main() -> None:
     if not images or not validation_images:
         raise ValueError("Both training and validation sets must contain labeled images")
 
-    model = models.CellposeModel(gpu=True, model_type=args.pretrained_model)
+    expanded_keys = None
+    training_channels: list[int] | None = [args.chan, args.chan2]
+    if args.three_channel_transfer:
+        model, expanded_keys = _build_three_channel_model(args.pretrained_model)
+        images = [prepare_three_channel_cellpose_image(value) for value in images]
+        validation_images = [
+            prepare_three_channel_cellpose_image(value) for value in validation_images
+        ]
+        if args.auxiliary_dropout_probability == 0.5:
+            original_images = images
+            images = []
+            original_labels = labels
+            labels = []
+            for image, label in zip(original_images, original_labels, strict=True):
+                images.append(image)
+                labels.append(label)
+                dropped = image.copy()
+                dropped[1] = 0
+                images.append(dropped)
+                labels.append(label)
+        training_channels = None
+    else:
+        model = models.CellposeModel(gpu=True, model_type=args.pretrained_model)
     model_path, train_losses, validation_losses = train.train_seg(
         model.net,
         train_data=images,
         train_labels=labels,
-        train_files=image_names,
+        train_files=None if args.three_channel_transfer else image_names,
         test_data=validation_images,
         test_labels=validation_labels,
-        test_files=validation_names,
+        test_files=None if args.three_channel_transfer else validation_names,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         n_epochs=args.epochs,
         weight_decay=args.weight_decay,
         momentum=args.momentum,
-        SGD=True,
-        channels=[args.chan, args.chan2],
+        SGD=args.optimizer == "sgd",
+        channels=training_channels,
         save_path=args.output_dir,
         save_every=args.save_every,
         save_each=True,
@@ -92,7 +155,13 @@ def main() -> None:
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "save_every": args.save_every,
-        "channels": [args.chan, args.chan2],
+        "channels": ["GFAP", "GFP", "DAPI"] if args.three_channel_transfer else [args.chan, args.chan2],
+        "input_channels": 3 if args.three_channel_transfer else 2,
+        "expanded_input_weights": expanded_keys,
+        "auxiliary_dropout_probability": (
+            args.auxiliary_dropout_probability if args.three_channel_transfer else 0.0
+        ),
+        "optimizer": args.optimizer,
         "training_images": [str(path) for path in image_names],
         "validation_images": [str(path) for path in validation_names],
     }
