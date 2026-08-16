@@ -144,9 +144,18 @@ def predict_split(
             ownership_offsets=np.mean(
                 [value.ownership_offsets for value in head_predictions], axis=0
             ).astype(np.float32),
+            foreground_probability=np.mean(
+                [
+                    value.foreground_probability
+                    if value.foreground_probability is not None
+                    else 1.0 - value.semantic_probabilities[0]
+                    for value in head_predictions
+                ],
+                axis=0,
+            ).astype(np.float32),
         )
         result = separate_astrocyte_instances(
-            1.0 - heads.semantic_probabilities[0],
+            heads.foreground_probability,
             nuclei,
             semantic_probabilities=heads.semantic_probabilities,
             boundary_probability=heads.boundary_probability,
@@ -161,6 +170,9 @@ def predict_split(
             ),
             min_nucleus_foreground_fraction=float(
                 postprocessing.get("min_nucleus_foreground_fraction", 0)
+            ),
+            nucleus_probability_threshold=float(
+                postprocessing.get("nucleus_probability_threshold", 0)
             ),
             offset_scale=float(postprocessing.get("offset_scale", data.get("offset_scale", 256))),
             max_offset_endpoint_distance=float(
@@ -187,6 +199,7 @@ def predict_split(
             semantic_probabilities=heads.semantic_probabilities,
             boundary_probability=heads.boundary_probability,
             ownership_offsets=heads.ownership_offsets,
+            foreground_probability=heads.foreground_probability,
         )
         tifffile.imwrite(label_path, result.labels, photometric="minisblack")
         tifffile.imwrite(compartment_path, result.compartments, photometric="minisblack")
@@ -278,6 +291,10 @@ def main() -> None:
         if "best_nucleus_support_expansion" in evaluation:
             postprocessing["nucleus_support_expansion"] = int(
                 evaluation["best_nucleus_support_expansion"]
+            )
+        if "best_nucleus_probability_threshold" in evaluation:
+            postprocessing["nucleus_probability_threshold"] = float(
+                evaluation["best_nucleus_probability_threshold"]
             )
     manifest = predict_split(
         configuration,

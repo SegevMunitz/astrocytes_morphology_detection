@@ -107,6 +107,8 @@ class NucleusGuidedInstanceLoss(nn.Module):
         offset_weight: float = 1.0,
         semantic_class_weights: Sequence[float] | None = None,
         boundary_class_weights: Sequence[float] | None = None,
+        foreground_weight: float = 0.0,
+        foreground_class_weights: Sequence[float] | None = None,
     ) -> None:
         """Configure non-negative task weights with at least one active objective.
 
@@ -114,14 +116,18 @@ class NucleusGuidedInstanceLoss(nn.Module):
         be balanced against the more numerous semantic pixels.
         """
         super().__init__()
-        weights = (semantic_weight, boundary_weight, offset_weight)
+        weights = (semantic_weight, boundary_weight, offset_weight, foreground_weight)
         if any(weight < 0 for weight in weights) or sum(weights) == 0:
             raise ValueError("Instance-loss weights must be non-negative with a positive sum")
         self.semantic_weight = semantic_weight
         self.boundary_weight = boundary_weight
         self.offset_weight = offset_weight
+        self.foreground_weight = foreground_weight
         self.semantic_loss = CrossEntropyDiceLoss(class_weights=semantic_class_weights)
         self.boundary_loss = CrossEntropyDiceLoss(class_weights=boundary_class_weights)
+        self.foreground_loss = CrossEntropyDiceLoss(
+            class_weights=foreground_class_weights
+        )
 
     def forward(
         self,
@@ -142,6 +148,8 @@ class NucleusGuidedInstanceLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Return weighted total and unweighted per-head losses for diagnostics."""
         output_keys = {"semantic_logits", "boundary_logits", "offsets"}
+        if self.foreground_weight > 0:
+            output_keys.add("foreground_logits")
         target_keys = {"semantic", "boundary", "offsets", "offset_mask"}
         missing_outputs = output_keys - set(outputs)
         missing_targets = target_keys - set(targets)
@@ -152,6 +160,12 @@ class NucleusGuidedInstanceLoss(nn.Module):
             )
         semantic = self.semantic_loss(outputs["semantic_logits"], targets["semantic"].long())
         boundary = self.boundary_loss(outputs["boundary_logits"], targets["boundary"].long())
+        foreground = torch.zeros((), device=outputs["semantic_logits"].device)
+        if self.foreground_weight > 0:
+            foreground_target = (targets["semantic"] > 0).long()
+            foreground = self.foreground_loss(
+                outputs["foreground_logits"], foreground_target
+            )
         predicted_offsets = outputs["offsets"]
         target_offsets = targets["offsets"].to(predicted_offsets.dtype)
         offset_mask = targets["offset_mask"].to(predicted_offsets.dtype)
@@ -167,10 +181,12 @@ class NucleusGuidedInstanceLoss(nn.Module):
             self.semantic_weight * semantic
             + self.boundary_weight * boundary
             + self.offset_weight * offset
+            + self.foreground_weight * foreground
         )
         return {
             "total": total,
             "semantic": semantic,
             "boundary": boundary,
             "offset": offset,
+            "foreground": foreground,
         }

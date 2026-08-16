@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -28,10 +28,12 @@ class InstanceEpochMetrics:
     total_loss: float
     semantic_dice: float
     boundary_dice: float
+    foreground_dice: float
     consistency_loss: float
     semantic_loss: float
     boundary_loss: float
     offset_loss: float
+    foreground_loss: float
 
     def __getitem__(self, index: int) -> float:
         """Retain index access for existing smoke-test reporting."""
@@ -39,10 +41,12 @@ class InstanceEpochMetrics:
             self.total_loss,
             self.semantic_dice,
             self.boundary_dice,
+            self.foreground_dice,
             self.consistency_loss,
             self.semantic_loss,
             self.boundary_loss,
             self.offset_loss,
+            self.foreground_loss,
         )[index]
 
 
@@ -87,13 +91,26 @@ def run_instance_epoch(
     total_loss = 0.0
     total_semantic_dice = 0.0
     total_boundary_dice = 0.0
+    total_foreground_dice = 0.0
     total_consistency = 0.0
     total_semantic_loss = 0.0
     total_boundary_loss = 0.0
     total_offset_loss = 0.0
-    batches = 0
+    total_foreground_loss = 0.0
+    batch_count = 0
+    labeled_iterator = iter(data_loader)
     unlabeled_iterator = iter(unlabeled_loader) if unlabeled_loader is not None else None
-    for batch in tqdm(data_loader, desc="train" if training else "val", leave=False):
+    step_count = len(data_loader)
+    if training and unlabeled_loader is not None:
+        # Consume every unlabeled patch once per epoch, cycling the smaller
+        # supervised set instead of seeing only a small random unlabeled subset.
+        step_count = max(step_count, len(unlabeled_loader))
+    for _ in tqdm(range(step_count), desc="train" if training else "val", leave=False):
+        try:
+            batch = next(labeled_iterator)
+        except StopIteration:
+            labeled_iterator = iter(data_loader)
+            batch = next(labeled_iterator)
         images = batch["image"].to(device=device, dtype=torch.float32)
         targets = _move_targets(batch["targets"], device)
         if optimizer is not None:
@@ -139,7 +156,10 @@ def run_instance_epoch(
                     teacher_outputs = teacher(unlabeled)
                 student_outputs = model(strong)
                 consistency_terms = []
-                for head in ("semantic_logits", "boundary_logits"):
+                probability_heads = ["semantic_logits", "boundary_logits"]
+                if "foreground_logits" in teacher_outputs:
+                    probability_heads.append("foreground_logits")
+                for head in probability_heads:
                     teacher_probability = torch.softmax(teacher_outputs[head], dim=1)
                     student_probability = torch.softmax(student_outputs[head], dim=1)
                     confident = (
@@ -149,6 +169,21 @@ def run_instance_epoch(
                     values = (student_probability - teacher_probability).square()
                     denominator = confident.sum().clamp_min(1) * values.shape[1]
                     consistency_terms.append((values * confident).sum() / denominator)
+                if "foreground_logits" in teacher_outputs:
+                    teacher_foreground = torch.softmax(
+                        teacher_outputs["foreground_logits"], dim=1
+                    )[:, 1]
+                    confident_foreground = teacher_foreground >= consistency_confidence
+                    offset_values = torch.nn.functional.smooth_l1_loss(
+                        student_outputs["offsets"],
+                        teacher_outputs["offsets"],
+                        reduction="none",
+                    )
+                    offset_mask = confident_foreground.unsqueeze(1)
+                    denominator = offset_mask.sum().clamp_min(1) * offset_values.shape[1]
+                    consistency_terms.append(
+                        (offset_values * offset_mask).sum() / denominator
+                    )
                 consistency = torch.stack(consistency_terms).mean()
                 loss = loss + consistency_weight * consistency
             if optimizer is not None:
@@ -178,6 +213,7 @@ def run_instance_epoch(
         total_semantic_loss += float(loss_components["semantic"].detach().cpu())
         total_boundary_loss += float(loss_components["boundary"].detach().cpu())
         total_offset_loss += float(loss_components["offset"].detach().cpu())
+        total_foreground_loss += float(loss_components["foreground"].detach().cpu())
         total_consistency += float(consistency.detach().cpu())
         total_semantic_dice += metrics_from_logits(
             outputs["semantic_logits"].detach(), targets["semantic"]
@@ -185,24 +221,31 @@ def run_instance_epoch(
         total_boundary_dice += metrics_from_logits(
             outputs["boundary_logits"].detach(), targets["boundary"]
         )["macro"]["dice"]
-        batches += 1
-    if batches == 0:
+        if "foreground_logits" in outputs:
+            total_foreground_dice += metrics_from_logits(
+                outputs["foreground_logits"].detach(),
+                (targets["semantic"] > 0).long(),
+            )["macro"]["dice"]
+        batch_count += 1
+    if batch_count == 0:
         raise ValueError("Data loader produced no instance batches")
     return InstanceEpochMetrics(
-        total_loss=total_loss / batches,
-        semantic_dice=total_semantic_dice / batches,
-        boundary_dice=total_boundary_dice / batches,
-        consistency_loss=total_consistency / batches,
-        semantic_loss=total_semantic_loss / batches,
-        boundary_loss=total_boundary_loss / batches,
-        offset_loss=total_offset_loss / batches,
+        total_loss=total_loss / batch_count,
+        semantic_dice=total_semantic_dice / batch_count,
+        boundary_dice=total_boundary_dice / batch_count,
+        foreground_dice=total_foreground_dice / batch_count,
+        consistency_loss=total_consistency / batch_count,
+        semantic_loss=total_semantic_loss / batch_count,
+        boundary_loss=total_boundary_loss / batch_count,
+        offset_loss=total_offset_loss / batch_count,
+        foreground_loss=total_foreground_loss / batch_count,
     )
 
 
 def train_instance_model(
     model: nn.Module,
     train_loader: DataLoader[Any],
-    validation_loader: DataLoader[Any],
+    validation_loader: DataLoader[Any] | None,
     criterion: NucleusGuidedInstanceLoss,
     configuration: dict[str, Any],
     output_directory: str | Path,
@@ -220,15 +263,25 @@ def train_instance_model(
         lr=float(training["learning_rate"]),
         weight_decay=float(training["weight_decay"]),
     )
-    scheduler = None
+    scheduler: ReduceLROnPlateau | CosineAnnealingLR | None = None
     if bool(training.get("lr_scheduler_enabled", True)):
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode="max",
-            factor=float(training.get("lr_reduce_factor", 0.5)),
-            patience=int(training.get("lr_patience", 5)),
-            min_lr=float(training.get("minimum_learning_rate", 1e-6)),
-        )
+        scheduler_name = str(training.get("lr_scheduler", "plateau")).lower()
+        if scheduler_name == "plateau":
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode="max",
+                factor=float(training.get("lr_reduce_factor", 0.5)),
+                patience=int(training.get("lr_patience", 5)),
+                min_lr=float(training.get("minimum_learning_rate", 1e-6)),
+            )
+        elif scheduler_name == "cosine":
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=int(training["epochs"]),
+                eta_min=float(training.get("minimum_learning_rate", 1e-6)),
+            )
+        else:
+            raise ValueError("training.lr_scheduler must be 'plateau' or 'cosine'")
     destination = Path(output_directory)
     destination.mkdir(parents=True, exist_ok=True)
     model.to(device)
@@ -267,12 +320,16 @@ def train_instance_model(
                 augmentation.get("auxiliary_dropout_probability", 0)
             ),
         )
-        validation_values = run_instance_epoch(
-            model,
-            validation_loader,
-            criterion,
-            device,
-            mixed_precision=mixed_precision,
+        validation_values = (
+            run_instance_epoch(
+                model,
+                validation_loader,
+                criterion,
+                device,
+                mixed_precision=mixed_precision,
+            )
+            if validation_loader is not None
+            else None
         )
         row: dict[str, float | int] = {
             "epoch": epoch,
@@ -282,28 +339,54 @@ def train_instance_model(
             "train_offset_loss": train_values.offset_loss,
             "train_semantic_dice": train_values.semantic_dice,
             "train_boundary_dice": train_values.boundary_dice,
+            "train_foreground_dice": train_values.foreground_dice,
             "train_consistency_loss": train_values.consistency_loss,
+            "train_foreground_loss": train_values.foreground_loss,
             "consistency_weight": consistency_weight if unlabeled_loader is not None else 0.0,
             "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            "validation_loss": validation_values.total_loss,
-            "validation_semantic_loss": validation_values.semantic_loss,
-            "validation_boundary_loss": validation_values.boundary_loss,
-            "validation_offset_loss": validation_values.offset_loss,
-            "validation_semantic_dice": validation_values.semantic_dice,
-            "validation_boundary_dice": validation_values.boundary_dice,
         }
+        if validation_values is not None:
+            row.update(
+                {
+                    "validation_loss": validation_values.total_loss,
+                    "validation_semantic_loss": validation_values.semantic_loss,
+                    "validation_boundary_loss": validation_values.boundary_loss,
+                    "validation_offset_loss": validation_values.offset_loss,
+                    "validation_semantic_dice": validation_values.semantic_dice,
+                    "validation_boundary_dice": validation_values.boundary_dice,
+                    "validation_foreground_dice": validation_values.foreground_dice,
+                    "validation_foreground_loss": validation_values.foreground_loss,
+                }
+            )
         history.append(row)
         checkpoint_metric = str(
             training.get("checkpoint_metric", "validation_joint_dice")
         )
-        available_metrics = {
-            "validation_semantic_dice": validation_values.semantic_dice,
-            "validation_boundary_dice": validation_values.boundary_dice,
-            "validation_joint_dice": (
-                validation_values.semantic_dice + validation_values.boundary_dice
-            )
-            / 2.0,
-        }
+        if validation_values is not None:
+            available_metrics = {
+                "validation_semantic_dice": validation_values.semantic_dice,
+                "validation_boundary_dice": validation_values.boundary_dice,
+                "validation_joint_dice": (
+                    validation_values.semantic_dice + validation_values.boundary_dice
+                )
+                / 2.0,
+                "validation_foreground_dice": validation_values.foreground_dice,
+                "validation_instance_proxy": (
+                    2.0 * validation_values.foreground_dice
+                    + validation_values.semantic_dice
+                    + validation_values.boundary_dice
+                )
+                / 4.0,
+            }
+        else:
+            available_metrics = {
+                "training_instance_proxy": (
+                    2.0 * train_values.foreground_dice
+                    + train_values.semantic_dice
+                    + train_values.boundary_dice
+                )
+                / 4.0,
+            }
         if checkpoint_metric not in available_metrics:
             raise ValueError(
                 f"Unknown training.checkpoint_metric {checkpoint_metric!r}; "
@@ -311,8 +394,10 @@ def train_instance_model(
             )
         metric = available_metrics[checkpoint_metric]
         row["checkpoint_metric"] = metric
-        if scheduler is not None:
+        if isinstance(scheduler, ReduceLROnPlateau):
             scheduler.step(metric)
+        elif scheduler is not None:
+            scheduler.step()
         save_checkpoint(destination / "last.pt", model, optimizer, epoch, metric, configuration)
         save_every = int(training.get("save_every", 10))
         if save_every <= 0:
@@ -336,8 +421,21 @@ def train_instance_model(
             writer = csv.DictWriter(handle, fieldnames=list(row))
             writer.writeheader()
             writer.writerows(history)
-        if without_improvement >= int(training["early_stopping_patience"]):
+        if (
+            validation_loader is not None
+            and without_improvement >= int(training["early_stopping_patience"])
+        ):
             break
+    save_checkpoint(destination / "final.pt", model, optimizer, epoch, metric, configuration)
+    if teacher is not None:
+        save_checkpoint(
+            destination / "ema_final.pt",
+            teacher,
+            optimizer,
+            epoch,
+            metric,
+            configuration,
+        )
     return history
 
 

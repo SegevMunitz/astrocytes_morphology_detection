@@ -20,10 +20,10 @@ from astroseg.datasets import (
 )
 from astroseg.io import load_manifest, load_yaml_configuration
 from astroseg.models import build_model
-from astroseg.training import NucleusGuidedInstanceLoss, run_instance_epoch
+from astroseg.training import InstanceEpochMetrics, NucleusGuidedInstanceLoss, run_instance_epoch
 
 
-def run_real_smoke_test(configuration: dict) -> tuple[float, float, float, float]:
+def run_real_smoke_test(configuration: dict) -> InstanceEpochMetrics:
     """Load one labeled/unlabeled image and execute one complete optimizer step."""
     data = configuration["data"]
     manifest_path = Path(data["manifest_path"])
@@ -81,11 +81,13 @@ def run_real_smoke_test(configuration: dict) -> tuple[float, float, float, float
         parameter.requires_grad_(False)
     loss_configuration = configuration["loss"]
     criterion = NucleusGuidedInstanceLoss(
-        float(loss_configuration.get("semantic_weight", 1)),
-        float(loss_configuration.get("boundary_weight", 1)),
-        float(loss_configuration.get("offset_weight", 1)),
-        loss_configuration.get("semantic_class_weights"),
-        loss_configuration.get("boundary_class_weights"),
+        semantic_weight=float(loss_configuration.get("semantic_weight", 1)),
+        boundary_weight=float(loss_configuration.get("boundary_weight", 1)),
+        offset_weight=float(loss_configuration.get("offset_weight", 1)),
+        foreground_weight=float(loss_configuration.get("foreground_weight", 0)),
+        semantic_class_weights=loss_configuration.get("semantic_class_weights"),
+        boundary_class_weights=loss_configuration.get("boundary_class_weights"),
+        foreground_class_weights=loss_configuration.get("foreground_class_weights"),
     )
     optimizer = AdamW(model.parameters(), lr=1e-4)
     return run_instance_epoch(
@@ -108,8 +110,10 @@ def main() -> None:
     values = run_real_smoke_test(load_yaml_configuration(args.config))
     print(
         "Real multichannel smoke passed: "
-        f"loss={values[0]:.6f}, semantic_dice={values[1]:.4f}, "
-        f"boundary_dice={values[2]:.4f}, consistency={values[3]:.6f}"
+        f"loss={values.total_loss:.6f}, semantic_dice={values.semantic_dice:.4f}, "
+        f"boundary_dice={values.boundary_dice:.4f}, "
+        f"foreground_dice={values.foreground_dice:.4f}, "
+        f"consistency={values.consistency_loss:.6f}"
     )
 
 

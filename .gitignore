@@ -17,5 +17,6 @@ data/
 outputs/
 .astroseg_runtime/
 .astroseg_migration/
+.astroseg_gui/
 cluster_logs/*.out
 cluster_logs/*.err

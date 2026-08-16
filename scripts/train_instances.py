@@ -1,6 +1,7 @@
 """Train the nucleus-guided model that separates complete individual astrocytes."""
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +92,18 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
     cross_validation = configuration.get("cross_validation", {})
     output_directory = Path(configuration["output"]["directory"])
     explicit_split = configuration.get("explicit_split", {})
-    if explicit_split.get("enabled", False):
+    full_training = configuration.get("full_training", {})
+    if full_training.get("enabled", False):
+        if explicit_split.get("enabled", False):
+            raise ValueError("Full-data training cannot use an explicit validation split")
+        train_manifest = candidates.copy()
+        train_manifest["split"] = "train"
+        validation_manifest = None
+        output_directory.mkdir(parents=True, exist_ok=True)
+        train_manifest.to_csv(
+            output_directory / "cross_validation_assignments.csv", index=False
+        )
+    elif explicit_split.get("enabled", False):
         training_ids = _read_image_ids(Path(explicit_split["train_ids_path"]))
         validation_ids = _read_image_ids(Path(explicit_split["validation_ids_path"]))
         overlap = training_ids & validation_ids
@@ -162,8 +174,10 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         ),
         **common,
     )
-    validation_dataset = AstrocyteInstanceDataset(
-        validation_manifest, "val", augmentation=None, **common
+    validation_dataset = (
+        AstrocyteInstanceDataset(validation_manifest, "val", augmentation=None, **common)
+        if validation_manifest is not None
+        else None
     )
     loader_options = {
         "batch_size": int(configuration["training"]["batch_size"]),
@@ -171,7 +185,11 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         "collate_fn": collate_instance_batch,
     }
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
-    validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
+    validation_loader = (
+        DataLoader(validation_dataset, shuffle=False, **loader_options)
+        if validation_dataset is not None
+        else None
+    )
     unlabeled_loader = None
     semi_supervised = configuration.get("semi_supervised", {})
     if semi_supervised.get("enabled", False):
@@ -197,15 +215,47 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         int(model_configuration["num_classes"]),
         int(model_configuration.get("base_channels", 32)),
     )
+    initialization = str(model_configuration.get("initialization", "random")).lower()
+    if initialization != "random":
+        raise ValueError(
+            "Custom instance training supports random initialization only; "
+            "pretrained model weights must not enter this pipeline"
+        )
     loss = configuration["loss"]
     criterion = NucleusGuidedInstanceLoss(
-        float(loss.get("semantic_weight", 1)),
-        float(loss.get("boundary_weight", 1)),
-        float(loss.get("offset_weight", 1)),
-        loss.get("semantic_class_weights"),
-        loss.get("boundary_class_weights"),
+        semantic_weight=float(loss.get("semantic_weight", 1)),
+        boundary_weight=float(loss.get("boundary_weight", 1)),
+        offset_weight=float(loss.get("offset_weight", 1)),
+        foreground_weight=float(loss.get("foreground_weight", 0)),
+        semantic_class_weights=loss.get("semantic_class_weights"),
+        boundary_class_weights=loss.get("boundary_class_weights"),
+        foreground_class_weights=loss.get("foreground_class_weights"),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    summary = {
+        "architecture": str(model_configuration["architecture"]),
+        "initialization": initialization,
+        "parameter_count": int(sum(parameter.numel() for parameter in model.parameters())),
+        "labeled_training_images": int(train_manifest["image_id"].nunique()),
+        "validation_images": (
+            int(validation_manifest["image_id"].nunique())
+            if validation_manifest is not None
+            else 0
+        ),
+        "supervised_training_patches": len(train_dataset),
+        "validation_patches": len(validation_dataset) if validation_dataset is not None else 0,
+        "unlabeled_training_images": (
+            int(unlabeled_loader.dataset.manifest["image_id"].nunique())
+            if unlabeled_loader is not None
+            else 0
+        ),
+        "unlabeled_training_patches": (
+            len(unlabeled_loader.dataset) if unlabeled_loader is not None else 0
+        ),
+    }
+    (output_directory / "training_data_summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+    )
     return train_instance_model(
         model,
         train_loader,
@@ -231,6 +281,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-id-list", type=Path)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--train-all", action="store_true")
     parser.add_argument("--disable-lr-scheduler", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
@@ -252,6 +304,15 @@ def main() -> None:
     if args.config is None:
         raise SystemExit("--config is required unless --smoke-test is used")
     configuration = load_configuration(args.config)
+    if args.train_all:
+        configuration["full_training"] = {"enabled": True}
+        configuration.setdefault("cross_validation", {})["enabled"] = False
+        configuration["training"]["checkpoint_metric"] = "training_instance_proxy"
+        configuration["training"]["lr_scheduler"] = "cosine"
+    if args.seed is not None:
+        if args.seed < 0:
+            raise SystemExit("--seed must be non-negative")
+        configuration["seed"] = args.seed
     if (args.train_id_list is None) != (args.validation_id_list is None):
         raise SystemExit("--train-id-list and --validation-id-list must be supplied together")
     if args.train_id_list is not None:

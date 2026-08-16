@@ -15,13 +15,18 @@ from astroseg.datasets import (
     RandomInstanceAugmentation,
     RandomInstanceFlip,
 )
-from astroseg.models import MultichannelInstanceUNet, NucleusGuidedInstanceUNet
+from astroseg.models import (
+    AstroSegInstanceUNet,
+    MultichannelInstanceUNet,
+    NucleusGuidedInstanceUNet,
+)
 from astroseg.postprocessing import separate_astrocyte_instances
 from astroseg.preprocessing import build_astrocyte_instance_targets
 from astroseg.training import (
     NucleusGuidedInstanceLoss,
     instance_segmentation_metrics,
     process_ownership_accuracy,
+    train_instance_model,
 )
 from scripts.train_instances import _eligible_instance_rows
 
@@ -254,6 +259,79 @@ def test_multichannel_residual_model_requires_three_planes_and_all_heads() -> No
         MultichannelInstanceUNet(input_channels=4)
 
 
+def test_astroseg_v2_learns_explicit_foreground_from_random_weights() -> None:
+    """The custom production model exposes every independently trained head."""
+    model = AstroSegInstanceUNet(base_channels=8)
+    outputs = model(torch.rand(1, 3, 33, 35))
+    assert outputs["foreground_logits"].shape == (1, 2, 33, 35)
+    targets = {
+        "semantic": torch.randint(0, 4, (1, 33, 35)),
+        "boundary": torch.randint(0, 2, (1, 33, 35)),
+        "offsets": torch.zeros(1, 2, 33, 35),
+        "offset_mask": torch.ones(1, 33, 35),
+    }
+    loss = NucleusGuidedInstanceLoss(foreground_weight=1.5)(outputs, targets)
+    loss.backward()
+    assert model.foreground_output.weight.grad is not None
+    assert torch.isfinite(loss)
+
+
+def test_full_data_training_writes_final_student_and_ema_weights(tmp_path: Path) -> None:
+    """No-validation production training must finish without pretending to validate."""
+    model = AstroSegInstanceUNet(base_channels=2)
+    semantic = torch.zeros(1, 32, 32, dtype=torch.long)
+    semantic[:, 6:26, 6:26] = 3
+    supervised = [
+        {
+            "image": torch.rand(1, 3, 32, 32),
+            "targets": {
+                "semantic": semantic,
+                "boundary": torch.zeros(1, 32, 32, dtype=torch.long),
+                "offsets": torch.zeros(1, 2, 32, 32),
+                "offset_mask": (semantic > 0).float(),
+            },
+        }
+    ]
+    unlabeled = [{"image": torch.rand(1, 3, 32, 32)}]
+    configuration = {
+        "training": {
+            "epochs": 1,
+            "learning_rate": 1e-3,
+            "weight_decay": 0.0,
+            "lr_scheduler_enabled": True,
+            "lr_scheduler": "cosine",
+            "minimum_learning_rate": 1e-5,
+            "checkpoint_metric": "training_instance_proxy",
+            "save_every": 1,
+            "early_stopping_patience": 1,
+            "mixed_precision": False,
+        },
+        "semi_supervised": {
+            "consistency_weight": 0.1,
+            "confidence_threshold": 0.8,
+            "ema_decay": 0.99,
+            "ramp_epochs": 1,
+        },
+        "augmentation": {"auxiliary_dropout_probability": 0.0},
+    }
+
+    history = train_instance_model(
+        model,
+        supervised,
+        None,
+        NucleusGuidedInstanceLoss(foreground_weight=1.0),
+        configuration,
+        tmp_path,
+        torch.device("cpu"),
+        unlabeled_loader=unlabeled,
+    )
+
+    assert len(history) == 1
+    assert "validation_loss" not in history[0]
+    assert (tmp_path / "final.pt").is_file()
+    assert (tmp_path / "ema_final.pt").is_file()
+
+
 def test_instance_flip_corrects_ownership_vector_signs() -> None:
     """Spatial flips must negate only the matching offset component.
 
@@ -371,6 +449,42 @@ def test_nucleus_support_filter_rejects_a_nucleus_near_only_sparse_foreground() 
     assert result.cell_to_nucleus == {1: 11}
 
 
+def test_learned_nucleus_probability_rejects_non_astrocyte_nuclei() -> None:
+    """The predicted nucleus class must suppress otherwise plausible false cells."""
+    shape = (24, 32)
+    yy, xx = np.indices(shape)
+    nuclei = np.zeros(shape, dtype=np.uint16)
+    first = (yy - 12) ** 2 + (xx - 8) ** 2 <= 2**2
+    second = (yy - 12) ** 2 + (xx - 24) ** 2 <= 2**2
+    nuclei[first] = 11
+    nuclei[second] = 22
+    foreground = np.zeros(shape, dtype=np.float32)
+    foreground[(yy - 12) ** 2 + (xx - 8) ** 2 <= 6**2] = 1
+    foreground[(yy - 12) ** 2 + (xx - 24) ** 2 <= 6**2] = 1
+    semantic = np.zeros((4, *shape), dtype=np.float32)
+    semantic[0] = 1 - foreground
+    semantic[3] = foreground
+    semantic[1, first] = 0.9
+    semantic[3, first] = 0.1
+    semantic[1, second] = 0.1
+    semantic[3, second] = 0.9
+
+    result = separate_astrocyte_instances(
+        foreground,
+        nuclei,
+        semantic_probabilities=semantic,
+        nucleus_probability_threshold=0.5,
+        max_nucleus_to_gfap_distance=4,
+        soma_expansion=1,
+        min_cell_area=1,
+        min_gfap_area=1,
+    )
+
+    assert result.active_nucleus_count == 1
+    assert result.rejected_nucleus_count == 1
+    assert result.cell_to_nucleus == {1: 11}
+
+
 def test_nucleus_support_filter_validates_coverage_parameters() -> None:
     """Invalid support controls should fail before reconstruction starts."""
     probability = np.ones((8, 8), dtype=np.float32)
@@ -383,6 +497,10 @@ def test_nucleus_support_filter_validates_coverage_parameters() -> None:
     with pytest.raises(ValueError, match="min_nucleus_foreground_fraction"):
         separate_astrocyte_instances(
             probability, nuclei, min_nucleus_foreground_fraction=1.1
+        )
+    with pytest.raises(ValueError, match="nucleus_probability_threshold"):
+        separate_astrocyte_instances(
+            probability, nuclei, nucleus_probability_threshold=1.1
         )
 
 

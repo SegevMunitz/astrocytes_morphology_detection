@@ -51,6 +51,8 @@ def _active_nucleus_markers(
     max_distance: float,
     support_expansion: int,
     min_foreground_fraction: float,
+    nucleus_probability: np.ndarray | None = None,
+    nucleus_probability_threshold: float = 0.0,
 ) -> tuple[np.ndarray, dict[int, int]]:
     """Create sequential markers for nuclei supported by nearby GFAP foreground.
 
@@ -69,9 +71,15 @@ def _active_nucleus_markers(
             else ndi.binary_dilation(nucleus_mask, iterations=support_expansion)
         )
         foreground_fraction = float(foreground[support].mean())
+        predicted_probability = (
+            float(nucleus_probability[nucleus_mask].mean())
+            if nucleus_probability is not None
+            else 1.0
+        )
         if (
             float(distance_to_foreground[nucleus_mask].min()) <= max_distance
             and foreground_fraction >= min_foreground_fraction
+            and predicted_probability >= nucleus_probability_threshold
         ):
             markers[nucleus_mask] = next_cell
             cell_to_nucleus[next_cell] = int(nucleus_id)
@@ -96,6 +104,7 @@ def separate_astrocyte_instances(
     min_gfap_area: int = 20,
     nucleus_support_expansion: int = 4,
     min_nucleus_foreground_fraction: float = 0.0,
+    nucleus_probability_threshold: float = 0.0,
 ) -> AstrocyteInstanceResult:
     """Assign soma and processes to nuclei and return individual cell instances.
 
@@ -132,6 +141,17 @@ def separate_astrocyte_instances(
         raise ValueError("nucleus_support_expansion must be non-negative")
     if not 0.0 <= min_nucleus_foreground_fraction <= 1.0:
         raise ValueError("min_nucleus_foreground_fraction must be in [0, 1]")
+    if not 0.0 <= nucleus_probability_threshold <= 1.0:
+        raise ValueError("nucleus_probability_threshold must be in [0, 1]")
+
+    nucleus_probability = None
+    if semantic_probabilities is not None:
+        semantic_probs = np.asarray(semantic_probabilities)
+        if semantic_probs.shape != (4, *probability.shape):
+            raise ValueError("semantic_probabilities must have shape [4, H, W]")
+        if not np.isfinite(semantic_probs).all() or np.any(semantic_probs < 0):
+            raise ValueError("semantic_probabilities must be finite and non-negative")
+        nucleus_probability = semantic_probs[COMPARTMENT_CLASSES["nucleus"]]
 
     foreground = probability >= foreground_threshold
     if not foreground.any():
@@ -142,6 +162,8 @@ def separate_astrocyte_instances(
         max_nucleus_to_gfap_distance,
         nucleus_support_expansion,
         min_nucleus_foreground_fraction,
+        nucleus_probability,
+        nucleus_probability_threshold,
     )
     if not preliminary_mapping:
         raise ValueError("No detected nucleus is sufficiently close to GFAP foreground")
@@ -209,11 +231,7 @@ def separate_astrocyte_instances(
         cell_to_nucleus[new_id] = nucleus_id
 
     if semantic_probabilities is not None:
-        semantic_probs = np.asarray(semantic_probabilities)
-        if semantic_probs.shape != (4, *probability.shape):
-            raise ValueError("semantic_probabilities must have shape [4, H, W]")
-        if not np.isfinite(semantic_probs).all() or np.any(semantic_probs < 0):
-            raise ValueError("semantic_probabilities must be finite and non-negative")
+        assert semantic_probs is not None
         compartments = semantic_probs.argmax(axis=0).astype(np.uint8)
         compartments[(relabeled > 0) & (compartments == 0)] = COMPARTMENT_CLASSES["process"]
         compartments[relabeled == 0] = COMPARTMENT_CLASSES["background"]

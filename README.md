@@ -237,6 +237,45 @@ loss is useful for comparing runs made with the same split, but it is not a fina
 biological-quality score; inspect overlays and report held-out instance metrics
 before using a model for scientific conclusions.
 
+### Local mask comparison and correction GUI
+
+The project includes a lightweight Cellpose-like desktop viewer for comparing
+several models on exactly the same images and manually correcting their instance
+masks. It uses the existing Python environment and does not overwrite any model
+prediction or source annotation.
+
+Arrange local files by model, keeping the original image basename for every mask:
+
+```text
+.astroseg_gui/comparison/
+    images/                 source TIFF/BMP images
+    masks/cyto2/            <image_id>.tiff
+    masks/cyto3/            <image_id>.tiff
+    masks/three_channel/    <image_id>.tiff
+    ground_truth/           <image_id>_seg.npy
+    corrections/            created by the GUI
+```
+
+Then launch it from PowerShell:
+
+```powershell
+.\.python311\python.exe scripts\launch_mask_review_gui.py `
+  --images .astroseg_gui\comparison\images `
+  --masks "Cyto2=.astroseg_gui\comparison\masks\cyto2" `
+  --masks "Cyto3=.astroseg_gui\comparison\masks\cyto3" `
+  --masks "New 3-channel=.astroseg_gui\comparison\masks\three_channel" `
+  --ground-truth .astroseg_gui\comparison\ground_truth `
+  --corrections .astroseg_gui\comparison\corrections
+```
+
+Use `Compare models` for a side-by-side raw/ground-truth/model montage. When
+ground truth is supplied, each model panel reports held-out instance F1 and PQ at
+IoU 0.5. Left-click selects cells; the paint, erase, merge, new-cell, delete, and
+undo controls provide basic corrections. The mouse wheel zooms and right-drag
+pans. Saving writes both a sequential-label TIFF for this pipeline and an editable
+Cellpose `_seg.npy` into `corrections/`. Run the same command with `--check-only`
+to verify all filename matches without opening a window.
+
 ### Current experiment
 
 The `multichannel_20260816` snapshot contains 33 training images (10 reviewed
@@ -248,6 +287,15 @@ Scientific comparison is based on held-out instance F1 and panoptic quality, not
 training loss. Final scores and test predictions are written under the cluster
 `evaluations/` and `instance_predictions/` directories rather than asserted in
 documentation before the jobs complete.
+
+`configs/train_astroseg_v2_cluster.yaml` is the independent custom-model path. It
+uses random initialization only—no Cellpose checkpoint can be loaded—and trains
+an explicit foreground head together with compartment, touching-boundary, and
+nucleus-ownership heads. Its multiscale bottleneck has about 8.0 million learned
+parameters. During each epoch it cycles the smaller supervised loader until every
+patch from all unlabeled training images has contributed to EMA consistency. The
+run writes `training_data_summary.json` so the initialization, image counts,
+patch counts, and parameter count remain auditable.
 
 ## Repository map
 

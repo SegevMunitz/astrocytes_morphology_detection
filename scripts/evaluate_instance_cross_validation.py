@@ -110,12 +110,17 @@ def _separate(
     max_nucleus_distance: float | None = None,
     min_nucleus_foreground_fraction: float | None = None,
     nucleus_support_expansion: int | None = None,
+    nucleus_probability_threshold: float | None = None,
 ) -> AstrocyteInstanceResult:
     """Apply a candidate threshold pair while retaining configured geometry."""
     data = configuration["data"]
     postprocessing = configuration.get("postprocessing", {})
     return separate_astrocyte_instances(
-        1.0 - heads.semantic_probabilities[0],
+        (
+            heads.foreground_probability
+            if heads.foreground_probability is not None
+            else 1.0 - heads.semantic_probabilities[0]
+        ),
         nuclei,
         semantic_probabilities=heads.semantic_probabilities,
         boundary_probability=heads.boundary_probability,
@@ -137,6 +142,11 @@ def _separate(
             if min_nucleus_foreground_fraction is not None
             else postprocessing.get("min_nucleus_foreground_fraction", 0)
         ),
+        nucleus_probability_threshold=float(
+            nucleus_probability_threshold
+            if nucleus_probability_threshold is not None
+            else postprocessing.get("nucleus_probability_threshold", 0)
+        ),
         offset_scale=float(postprocessing.get("offset_scale", data.get("offset_scale", 256))),
         max_offset_endpoint_distance=float(
             postprocessing.get("max_offset_endpoint_distance", 32)
@@ -151,12 +161,14 @@ def _separate(
 def _save_heads(path: Path, heads: InstanceHeadPredictions) -> None:
     """Persist raw heads so postprocessing is reproducible without another GPU pass."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        semantic_probabilities=heads.semantic_probabilities,
-        boundary_probability=heads.boundary_probability,
-        ownership_offsets=heads.ownership_offsets,
-    )
+    payload = {
+        "semantic_probabilities": heads.semantic_probabilities,
+        "boundary_probability": heads.boundary_probability,
+        "ownership_offsets": heads.ownership_offsets,
+    }
+    if heads.foreground_probability is not None:
+        payload["foreground_probability"] = heads.foreground_probability
+    np.savez_compressed(path, **payload)
 
 
 def _load_heads(path: Path) -> InstanceHeadPredictions:
@@ -166,6 +178,11 @@ def _load_heads(path: Path) -> InstanceHeadPredictions:
             semantic_probabilities=payload["semantic_probabilities"],
             boundary_probability=payload["boundary_probability"],
             ownership_offsets=payload["ownership_offsets"],
+            foreground_probability=(
+                payload["foreground_probability"]
+                if "foreground_probability" in payload
+                else None
+            ),
         )
 
 
@@ -180,6 +197,7 @@ def evaluate_cross_validation(
     max_nucleus_distances: Sequence[float] = (8.0, 16.0, 32.0),
     min_nucleus_foreground_fractions: Sequence[float] = (0.0,),
     nucleus_support_expansion: int = 4,
+    nucleus_probability_thresholds: Sequence[float] = (0.0,),
     checkpoint_name: str = "best.pt",
 ) -> pd.DataFrame:
     """Generate OOF heads, tune thresholds, and aggregate object-level metrics.
@@ -198,6 +216,7 @@ def evaluate_cross_validation(
             boundary_thresholds,
             max_nucleus_distances,
             min_nucleus_foreground_fractions,
+            nucleus_probability_thresholds,
         )
     )
     if not threshold_settings:
@@ -212,6 +231,8 @@ def evaluate_cross_validation(
         raise ValueError("min_nucleus_foreground_fractions must be in [0, 1]")
     if nucleus_support_expansion < 0:
         raise ValueError("nucleus_support_expansion must be non-negative")
+    if any(not 0.0 <= value <= 1.0 for value in nucleus_probability_thresholds):
+        raise ValueError("nucleus_probability_thresholds must be in [0, 1]")
     for fold_directory in sorted(run_directory.glob("fold_*")):
         assignments_path = fold_directory / "cross_validation_assignments.csv"
         checkpoint_path = fold_directory / checkpoint_name
@@ -259,6 +280,7 @@ def evaluate_cross_validation(
                 boundary_threshold,
                 max_nucleus_distance,
                 min_nucleus_foreground_fraction,
+                nucleus_probability_threshold,
             ) in threshold_settings:
                 error = ""
                 try:
@@ -271,6 +293,7 @@ def evaluate_cross_validation(
                         max_nucleus_distance,
                         min_nucleus_foreground_fraction,
                         nucleus_support_expansion,
+                        nucleus_probability_threshold,
                     )
                     prediction = separated.labels
                 except ValueError as exception:
@@ -289,6 +312,7 @@ def evaluate_cross_validation(
                             min_nucleus_foreground_fraction
                         ),
                         "nucleus_support_expansion": nucleus_support_expansion,
+                        "nucleus_probability_threshold": nucleus_probability_threshold,
                         **metrics,
                         "postprocessing_error": error,
                     }
@@ -317,6 +341,7 @@ def evaluate_cross_validation(
                 "max_nucleus_to_gfap_distance",
                 "min_nucleus_foreground_fraction",
                 "nucleus_support_expansion",
+                "nucleus_probability_threshold",
             ]
         )[
             ["f1", "panoptic_quality", "precision", "recall"]
@@ -332,6 +357,7 @@ def evaluate_cross_validation(
     best_nucleus_distance = float(best["max_nucleus_to_gfap_distance"])
     best_nucleus_fraction = float(best["min_nucleus_foreground_fraction"])
     best_support_expansion = int(best["nucleus_support_expansion"])
+    best_nucleus_probability = float(best["nucleus_probability_threshold"])
 
     records: list[dict[str, Any]] = []
     for example in examples:
@@ -347,6 +373,7 @@ def evaluate_cross_validation(
             best_nucleus_distance,
             best_nucleus_fraction,
             best_support_expansion,
+            best_nucleus_probability,
         )
         prediction_path = output_directory / "labels" / f"{example['image_id']}.tiff"
         prediction_path.parent.mkdir(parents=True, exist_ok=True)
@@ -397,6 +424,7 @@ def evaluate_cross_validation(
         "best_max_nucleus_to_gfap_distance": best_nucleus_distance,
         "best_min_nucleus_foreground_fraction": best_nucleus_fraction,
         "best_nucleus_support_expansion": best_support_expansion,
+        "best_nucleus_probability_threshold": best_nucleus_probability,
         "best_tuning_mean_f1": float(best["f1"]),
         "best_tuning_mean_panoptic_quality": float(best["panoptic_quality"]),
     }
@@ -449,6 +477,11 @@ def parse_args() -> argparse.Namespace:
         default=(0.0,),
     )
     parser.add_argument("--nucleus-support-expansion", type=int, default=4)
+    parser.add_argument(
+        "--nucleus-probability-thresholds",
+        type=_parse_float_values,
+        default=(0.0,),
+    )
     parser.add_argument("--checkpoint-name", default="best.pt")
     return parser.parse_args()
 
@@ -468,6 +501,7 @@ def main() -> None:
             args.min_nucleus_foreground_fractions
         ),
         nucleus_support_expansion=args.nucleus_support_expansion,
+        nucleus_probability_thresholds=args.nucleus_probability_thresholds,
         checkpoint_name=args.checkpoint_name,
     )
     mean = result.loc[result["iou_threshold"] == 0.5, ["f1", "panoptic_quality"]].mean()

@@ -24,4 +24,4 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export PYTHONUNBUFFERED=1
 
 python scripts/smoke_test_real_multichannel.py \
-    --config configs/train_instances_cluster.yaml
+    --config "${ASTROSEG_CONFIG:-configs/train_instances_cluster.yaml}"

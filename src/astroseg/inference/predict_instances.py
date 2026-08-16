@@ -24,6 +24,7 @@ class InstanceHeadPredictions:
     semantic_probabilities: np.ndarray
     boundary_probability: np.ndarray
     ownership_offsets: np.ndarray
+    foreground_probability: np.ndarray | None = None
 
 
 def predict_instance_patch(
@@ -48,9 +49,14 @@ def predict_instance_patch(
         semantic = torch.softmax(outputs["semantic_logits"], dim=1)[0]
         boundary = torch.softmax(outputs["boundary_logits"], dim=1)[0, 1:2]
         offsets = outputs["offsets"][0]
+        foreground = (
+            torch.softmax(outputs["foreground_logits"], dim=1)[0, 1:2]
+            if "foreground_logits" in outputs
+            else (1.0 - semantic[0:1])
+        )
     return tuple(
         value.cpu().numpy().astype(np.float32, copy=False)
-        for value in (semantic, boundary, offsets)
+        for value in (semantic, boundary, offsets, foreground)
     )
 
 
@@ -82,4 +88,7 @@ def predict_instance_full_image(
     offsets = stitch_probability_patches(
         [value[2] for value in predictions], coordinates, inputs.shape[-2:]
     )
-    return InstanceHeadPredictions(semantic, boundary, offsets)
+    foreground = stitch_probability_patches(
+        [value[3] for value in predictions], coordinates, inputs.shape[-2:]
+    )[0]
+    return InstanceHeadPredictions(semantic, boundary, offsets, foreground)

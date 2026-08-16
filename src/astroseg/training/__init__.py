@@ -7,6 +7,7 @@ from astroseg.training.instance_metrics import (
     process_ownership_accuracy,
 )
 from astroseg.training.instance_trainer import (
+    InstanceEpochMetrics,
     run_instance_epoch,
     run_instance_overfit_smoke_test,
     train_instance_model,
@@ -26,6 +27,7 @@ from astroseg.training.cross_validation import (
 __all__ = [
     "CrossEntropyDiceLoss",
     "DiceLoss",
+    "InstanceEpochMetrics",
     "NucleusGuidedInstanceLoss",
     "instance_segmentation_metrics",
     "match_instances",

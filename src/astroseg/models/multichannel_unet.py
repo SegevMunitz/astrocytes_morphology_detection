@@ -52,6 +52,47 @@ class ResidualUpBlock(nn.Module):
         return self.refine(torch.cat((skip, self.reduce(inputs)), dim=1))
 
 
+class MultiScaleContextBlock(nn.Module):
+    """Fuse local and long-range context without a pretrained encoder.
+
+    At the 1/16-resolution bottleneck, dilations one, two, and four cover cell
+    bodies and long processes while keeping the parameter count practical.
+    """
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        hidden = max(8, channels // 4)
+        self.branches = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(channels, hidden, 1, bias=False),
+                    nn.GroupNorm(_group_count(hidden), hidden),
+                    nn.SiLU(inplace=True),
+                    nn.Conv2d(
+                        hidden,
+                        hidden,
+                        3,
+                        padding=dilation,
+                        dilation=dilation,
+                        groups=hidden,
+                        bias=False,
+                    ),
+                )
+                for dilation in (1, 2, 4)
+            ]
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(hidden * 3, channels, 1, bias=False),
+            nn.GroupNorm(_group_count(channels), channels),
+        )
+        self.activation = nn.SiLU(inplace=True)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return a residual fusion of three bottleneck receptive fields."""
+        context = self.fuse(torch.cat([branch(inputs) for branch in self.branches], dim=1))
+        return self.activation(inputs + context)
+
+
 class MultichannelInstanceUNet(nn.Module):
     """Four-level residual U-Net with compartment, boundary, and offset heads.
 
@@ -113,6 +154,41 @@ class MultichannelInstanceUNet(nn.Module):
         """Return all instance-training heads at the input spatial resolution."""
         features = self._decode_features(inputs)
         return {
+            "semantic_logits": self.semantic_output(features),
+            "boundary_logits": self.boundary_output(features),
+            "offsets": self.offset_output(features),
+        }
+
+
+class AstroSegInstanceUNet(MultichannelInstanceUNet):
+    """From-scratch AstroSeg network optimized for individual-cell masks.
+
+    The legacy model is retained for old checkpoints. This version adds explicit
+    binary foreground supervision and multiscale bottleneck context; all weights
+    are initialized by PyTorch and learned only from the project dataset.
+    """
+
+    def __init__(
+        self,
+        input_channels: int = 3,
+        compartment_classes: int = 4,
+        base_channels: int = 32,
+    ) -> None:
+        super().__init__(input_channels, compartment_classes, base_channels)
+        bottleneck_channels = base_channels * 16
+        first_block = self.bottleneck[0]
+        self.bottleneck = nn.Sequential(
+            first_block,
+            MultiScaleContextBlock(bottleneck_channels),
+            nn.Dropout2d(0.15),
+        )
+        self.foreground_output = nn.Conv2d(base_channels, 2, 1)
+
+    def forward(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Predict foreground, compartments, boundaries, and nucleus offsets."""
+        features = self._decode_features(inputs)
+        return {
+            "foreground_logits": self.foreground_output(features),
             "semantic_logits": self.semantic_output(features),
             "boundary_logits": self.boundary_output(features),
             "offsets": self.offset_output(features),
