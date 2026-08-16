@@ -9,7 +9,8 @@ import tifffile
 import torch
 
 from astroseg.constants import MANIFEST_COLUMNS
-from astroseg.datasets import AstrocyteDataset
+from astroseg.datasets import AstrocyteDataset, prepare_model_inputs
+from astroseg.io.ome_tiff import MicroscopyImage
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
 from astroseg.preprocessing.normalize import percentile_normalize
 from astroseg.preprocessing.nuclei import labels_to_binary_mask, validate_nucleus_labels
@@ -143,3 +144,31 @@ def test_proximity_rejects_non_binary_mask() -> None:
     """
     with pytest.raises(ValueError, match="binary"):
         create_nucleus_proximity_map(np.array([[0, 2]], dtype=np.uint8))
+
+
+def test_fluorescence_inputs_reorder_channels_and_zero_fill_optional_plane(
+    tmp_path: Path,
+) -> None:
+    """Named test acquisitions become GFAP/GFP-or-zero/DAPI tensors."""
+    dapi = np.arange(30, dtype=np.uint16).reshape(5, 6)
+    cy5 = np.flipud(dapi) * 2
+    microscopy = MicroscopyImage(
+        image=np.stack((dapi, cy5)),
+        channel_names=["DAPI m", "Cy5"],
+        pixel_size_um=None,
+        source_path=tmp_path / "test.tif",
+    )
+    nuclei = np.zeros((5, 6), dtype=np.uint16)
+
+    inputs = prepare_model_inputs(
+        microscopy,
+        "Cy5",
+        nuclei,
+        input_mode="fluorescence",
+        dapi_channel="DAPI m",
+    )
+
+    assert inputs.shape == (3, 5, 6)
+    np.testing.assert_allclose(inputs[0], percentile_normalize(cy5))
+    assert not inputs[1].any()
+    np.testing.assert_allclose(inputs[2], percentile_normalize(dapi))

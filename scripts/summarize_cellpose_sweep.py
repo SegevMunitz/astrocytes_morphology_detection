@@ -7,6 +7,8 @@ import csv
 import json
 from pathlib import Path
 
+from openpyxl import Workbook
+
 
 def summarize_sweep(sweep_directory: Path) -> list[dict[str, str | int | float]]:
     """Return validation minima for every run and verify saved checkpoint paths."""
@@ -58,11 +60,31 @@ def summarize_sweep(sweep_directory: Path) -> list[dict[str, str | int | float]]
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the sweep root and optional summary output path."""
+    """Parse the sweep root and optional CSV and Excel output paths."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--excel-output", type=Path)
     return parser.parse_args()
+
+
+def write_excel(
+    summaries: list[dict[str, str | int | float]], output: Path
+) -> None:
+    """Write the ranked run summary as a filterable native Excel workbook."""
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Cellpose sweep"
+    fields = list(summaries[0])
+    worksheet.append(fields)
+    for row in summaries:
+        worksheet.append([row[field] for field in fields])
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for column in worksheet.columns:
+        width = min(max(len(str(cell.value or "")) for cell in column) + 2, 80)
+        worksheet.column_dimensions[column[0].column_letter].width = width
+    workbook.save(output)
 
 
 def main() -> None:
@@ -76,6 +98,8 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(summaries[0]))
         writer.writeheader()
         writer.writerows(summaries)
+    if args.excel_output is not None:
+        write_excel(summaries, args.excel_output)
     for row in summaries:
         print(
             f"{row['pretrained_model']} lr={row['learning_rate']}: "
@@ -83,6 +107,8 @@ def main() -> None:
             f"validation_loss={row['best_checkpoint_validation_loss']:.6f}"
         )
     print(f"Summary written to {output}")
+    if args.excel_output is not None:
+        print(f"Excel summary written to {args.excel_output}")
 
 
 if __name__ == "__main__":

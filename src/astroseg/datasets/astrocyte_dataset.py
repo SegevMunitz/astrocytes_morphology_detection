@@ -14,6 +14,7 @@ from astroseg.constants import ANNOTATION_STATUSES, TRAINABLE_ANNOTATION_STATUSE
 from astroseg.io.manifest import load_manifest, validate_manifest
 from astroseg.io.ome_tiff import MicroscopyImage, get_channel, load_ome_tiff
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
+from astroseg.preprocessing.channels import prepare_fluorescence_inputs
 from astroseg.preprocessing.normalize import percentile_normalize
 from astroseg.preprocessing.nuclei import labels_to_binary_mask, validate_nucleus_labels
 from astroseg.preprocessing.patches import PatchCoordinates, extract_patch, generate_patch_coordinates
@@ -73,12 +74,28 @@ def prepare_model_inputs(
     gfap_channel: str,
     nucleus_labels: np.ndarray,
     max_nucleus_distance: float = 64.0,
+    *,
+    input_mode: str = "nucleus_guidance",
+    auxiliary_channel: str = "",
+    dapi_channel: str = "",
 ) -> np.ndarray:
-    """Build the three channel-first inputs consumed by the baseline model.
+    """Build one validated channel-first input according to the model contract.
 
-    GFAP is percentile-normalized, nucleus instances become a binary mask, and
-    Euclidean distance supplies a bounded proximity plane.
+    ``fluorescence`` preserves three biological image planes in the canonical
+    GFAP/auxiliary/DAPI order.  ``nucleus_guidance`` retains the legacy
+    GFAP/binary-nucleus/proximity representation for old checkpoints.
     """
+    if input_mode == "fluorescence":
+        inputs, _ = prepare_fluorescence_inputs(
+            microscopy_image,
+            gfap_channel=gfap_channel,
+            auxiliary_channel=auxiliary_channel,
+            dapi_channel=dapi_channel,
+        )
+        validate_nucleus_labels(nucleus_labels, inputs.shape[-2:])
+        return inputs
+    if input_mode != "nucleus_guidance":
+        raise ValueError("input_mode must be 'fluorescence' or 'nucleus_guidance'")
     gfap = get_channel(microscopy_image, gfap_channel)
     validate_nucleus_labels(nucleus_labels, gfap.shape)
     nucleus_mask = labels_to_binary_mask(nucleus_labels)
@@ -104,6 +121,7 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         annotation_statuses: Collection[str] | None = TRAINABLE_ANNOTATION_STATUSES,
         manifest_base_directory: str | Path | None = None,
         num_classes: int | None = None,
+        input_mode: str = "nucleus_guidance",
     ) -> None:
         """Validate files and index annotated patches for one data split.
 
@@ -140,6 +158,7 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
         if num_classes is not None and num_classes < 2:
             raise ValueError("num_classes must be at least 2 when provided")
         self.num_classes = num_classes
+        self.input_mode = input_mode
         self._records: list[dict[str, Any]] = []
         self._cache_index: int | None = None
         self._cache_value: tuple[np.ndarray, np.ndarray] | None = None
@@ -212,6 +231,9 @@ class AstrocyteDataset(Dataset[dict[str, Any]]):
             row["gfap_channel"],
             labels,
             self.max_nucleus_distance,
+            input_mode=self.input_mode,
+            auxiliary_channel=str(row.get("auxiliary_channel", "")),
+            dapi_channel=str(row.get("dapi_channel", "")),
         )
         target = _load_2d_array(record["annotation_path"]).astype(np.int64)
         self._cache_index = record_index

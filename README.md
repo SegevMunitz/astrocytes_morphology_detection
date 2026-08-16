@@ -14,8 +14,10 @@ ownership:        every predicted cell is linked to one nucleus
 
 ## Model overview
 
-Every model input has three aligned channels: normalized GFAP intensity, a binary
-nucleus mask, and a nucleus-proximity map. A shared U-Net then predicts:
+Every model input has three aligned fluorescence planes in one fixed biological
+order: normalized GFAP/Cy5, GFP/auxiliary fluorescence, and DAPI. Acquisitions
+without GFP receive an explicit all-zero middle plane; transmitted-light planes
+are excluded. A residual GroupNorm U-Net then predicts:
 
 - semantic compartments (background, nucleus, soma, process);
 - boundaries between touching cells;
@@ -26,8 +28,8 @@ even when it passes near another nucleus. The older binary U-Net is retained as 
 foreground baseline, but it cannot separate individual cells.
 
 ```text
-image -> automatic GFAP/DAPI selection -> nucleus detection
-      -> nucleus-guided U-Net -> compartments + boundaries + ownership
+image -> metadata-aware GFAP/GFP/DAPI selection -> three-channel residual U-Net
+      -> compartments + boundaries + ownership -> nucleus-aware reconstruction
       -> complete individual astrocyte instances
 ```
 
@@ -75,23 +77,28 @@ mkdir -p cluster_logs
 sbatch scripts/slurm_setup.sh
 ```
 
-Prepare the migrated manifest once, then submit grouped cross-validation. Every
-fold receives one GPU; `%3` limits the array to three concurrent GPUs:
+Create one immutable, audited dataset snapshot, then submit grouped
+cross-validation. Every fold receives one GPU; `%3` limits the array to three
+concurrent GPUs:
 
 ```bash
 cd ~/astrocytes_morphology_detection
 export ASTROSEG_DATA_ROOT="$HOME/astroseg_data"
-bash scripts/prepare_cluster_storage.sh
+sbatch scripts/slurm_prepare_multichannel.sh
+export ASTROSEG_DATASET_NAME="multichannel_20260816"
+export ASTROSEG_RUN_NAME="multichannel_cross_validation"
 sbatch --array=0-4%3 scripts/slurm_train_instances.sh
 ```
 
-After selecting a checkpoint, predict all reserved test images with one GPU:
+After all folds finish, calibrate reconstruction thresholds on the explicit
+validation IDs, then predict the reserved test images by averaging all five fold
+models:
 
 ```bash
-export ASTROSEG_CHECKPOINT="$ASTROSEG_DATA_ROOT/outputs/checkpoints/cross_validation/fold_1/best.pt"
-export ASTROSEG_RUN_NAME="review_round_1"
-sbatch --export=ALL,ASTROSEG_DATA_ROOT,ASTROSEG_CHECKPOINT,ASTROSEG_RUN_NAME \
-  scripts/slurm_predict_instances.sh
+export ASTROSEG_TRAIN_RUN_NAME="multichannel_cross_validation"
+sbatch scripts/slurm_evaluate_instances.sh
+export ASTROSEG_RUN_NAME="multichannel_test_ensemble"
+sbatch scripts/slurm_predict_instances.sh
 ```
 
 All artifacts remain under `~/astroseg_data/outputs`. Human annotations and
@@ -105,10 +112,12 @@ automatic predictions are always separate, and no command uploads to Drive.
     training_masks/                  preserved source masks
     test_images/                     prediction-only images
     outputs/
-        metadata/                    manifests and split assignments
-        interim/                     channels, nuclei, distance maps, QC
-        annotations/                 preserved imports and derived masks
+        datasets/multichannel_20260816/
+            metadata/                manifests, mask audit, and snapshot summary
+            interim/                 channels, nuclei, distance maps, QC
+            annotations/             preserved imports and derived masks
         checkpoints/                 trained weights and learning history
+        evaluations/                 OOF metrics and calibrated thresholds
         instance_predictions/
             raw_heads/               model probabilities and ownership offsets
             labels/                  complete-cell instance IDs
@@ -118,9 +127,9 @@ automatic predictions are always separate, and no command uploads to Drive.
 ```
 
 Human annotations and automatic predictions are deliberately stored separately.
-Predictions never overwrite reviewed masks. `manifest_instances_cluster.csv`
-contains validated absolute cluster paths; the original imported manifest remains
-unchanged for provenance.
+Predictions never overwrite reviewed masks. The versioned
+`metadata/manifest_instances.csv` contains validated absolute cluster paths, while
+the source images and Cellpose exports remain unchanged for provenance.
 
 ## Annotation contract
 
@@ -162,7 +171,9 @@ Slurm uses `configs/train_instances_cluster.yaml`, whose storage paths come from
 `configs/train_instances.yaml`.
 
 Because there are only ten labeled images, cross-validation is grouped before
-patch extraction. All patches from the same image remain in one fold. If several
+patch extraction. All patches from the same image remain in one fold. The 23
+unlabeled training images contribute only through a confidence-filtered EMA
+teacher consistency loss; they are never assigned fabricated masks. If several
 images later come from the same biological well, add `well_id` to the manifest and
 change `group_column` from `image_id` to `well_id`.
 
@@ -209,7 +220,7 @@ sbatch scripts/slurm_train_cellpose3.sh
 ```
 
 For comparable learning-rate experiments, the committed lists in
-`configs/cellpose_split/` keep whole images in either training or validation. The
+`configs/cellpose_split_original_channels/` keep whole images in either training or validation. The
 two arrays cover `cyto2_cp3` and `cyto3`; each task uses one A100 GPU and writes its
 log, checkpoints, loss history, and run metadata inside its own result folder:
 
@@ -226,19 +237,17 @@ loss is useful for comparing runs made with the same split, but it is not a fina
 biological-quality score; inspect overlays and report held-out instance metrics
 before using a model for scientific conclusions.
 
-### Current baseline status
+### Current experiment
 
-The present nucleus-guided U-Net has 1.93 million trainable parameters. Grouped
-five-fold validation on the ten annotated images produced mean semantic Dice
-`0.813` and mean boundary Dice `0.203`. It is therefore a useful annotation
-bootstrap model, but cell separation and process ownership are not yet validated
-well enough for final scientific measurements.
-
-The architecture is intentionally unchanged during the storage migration. A
-larger U-Net or transformer would add capacity while the supervision set remains
-only ten images, increasing overfitting risk without addressing inconsistent or
-ambiguous process ownership. Reconsider architecture complexity after adding
-diverse corrected instances and measuring held-out instance F1/panoptic quality.
+The `multichannel_20260816` snapshot contains 33 training images (10 reviewed
+instance masks and 23 unlabeled images), 52 test images, and 3,638 annotated
+instances. The current residual model has about 4.28 million trainable parameters
+and uses fluorescence augmentation, class-weighted multi-head loss, mixed
+precision, learning-rate reduction, early stopping, and EMA teacher consistency.
+Scientific comparison is based on held-out instance F1 and panoptic quality, not
+training loss. Final scores and test predictions are written under the cluster
+`evaluations/` and `instance_predictions/` directories rather than asserted in
+documentation before the jobs complete.
 
 ## Repository map
 
@@ -247,7 +256,7 @@ configs/                 local and cluster-native pipeline settings
 src/astroseg/io/         BMP/TIFF/OME-TIFF and manifest loading
 src/astroseg/preprocessing/ channels, nuclei, patches, instance targets
 src/astroseg/datasets/   aligned semantic and instance datasets
-src/astroseg/models/     binary and nucleus-guided U-Nets
+src/astroseg/models/     binary, nucleus-guided, and multichannel residual U-Nets
 src/astroseg/training/   losses, metrics, grouped folds, trainers
 src/astroseg/inference/  patch and full-image prediction
 src/astroseg/postprocessing/ complete-cell reconstruction

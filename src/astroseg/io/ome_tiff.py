@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree
 
 import numpy as np
 import tifffile
@@ -42,7 +43,7 @@ def _normalize_axes(array: np.ndarray, axes: str, source: Path) -> np.ndarray:
     current_axes = list(axes)
     for index in range(len(current_axes) - 1, -1, -1):
         axis = current_axes[index]
-        if axis in {"C", "S", "Y", "X"}:
+        if axis in {"C", "S", "Q", "Y", "X"}:
             continue
         if data.shape[index] != 1:
             raise ValueError(
@@ -52,9 +53,12 @@ def _normalize_axes(array: np.ndarray, axes: str, source: Path) -> np.ndarray:
         data = np.squeeze(data, axis=index)
         current_axes.pop(index)
 
-    if "C" in current_axes and "S" in current_axes:
-        raise ValueError(f"Both C and S axes are present in {source}; channel layout is ambiguous.")
-    channel_axis_name = "C" if "C" in current_axes else ("S" if "S" in current_axes else None)
+    channel_axes = [axis for axis in ("C", "S", "Q") if axis in current_axes]
+    if len(channel_axes) > 1:
+        raise ValueError(
+            f"Several channel-like axes are present in {source}: {channel_axes}."
+        )
+    channel_axis_name = channel_axes[0] if channel_axes else None
     if channel_axis_name is None:
         if current_axes != ["Y", "X"]:
             raise ValueError(f"Cannot interpret axes {''.join(current_axes)!r} in {source}.")
@@ -65,6 +69,11 @@ def _normalize_axes(array: np.ndarray, axes: str, source: Path) -> np.ndarray:
     x_axis = current_axes.index("X")
     if len(current_axes) != 3:
         raise ValueError(f"Expected exactly channel, Y, and X axes in {source}; got {current_axes}.")
+    if channel_axis_name == "Q" and data.shape[channel_axis] not in {2, 3, 4}:
+        raise ValueError(
+            f"Generic Q axis in {source} can only represent 2-4 acquisition planes; "
+            f"received shape {data.shape}."
+        )
     return np.moveaxis(data, (channel_axis, y_axis, x_axis), (0, 1, 2))
 
 
@@ -79,7 +88,37 @@ def _parse_ome_metadata(xml: str | None, channel_count: int) -> tuple[list[str],
     if not xml:
         return names, pixel_size
 
-    ome = from_xml(xml)
+    try:
+        ome = from_xml(xml)
+    except ImportError:
+        # ome-types delegates conversion of pre-2016 OME schemas to lxml.  The
+        # acquisition files used here only need channel names and lateral pixel
+        # size, so a namespace-independent standard-library fallback keeps old
+        # Olympus metadata readable even in minimal inference environments.
+        root = ElementTree.fromstring(xml)
+        pixels = next(
+            (element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "Pixels"),
+            None,
+        )
+        if pixels is None:
+            return names, pixel_size
+        parsed_names = [
+            element.attrib.get("Name", "")
+            for element in pixels
+            if element.tag.rsplit("}", 1)[-1] == "Channel"
+        ]
+        if len(parsed_names) == channel_count:
+            names = parsed_names
+        physical_size = pixels.attrib.get("PhysicalSizeX")
+        if physical_size is not None:
+            value = float(physical_size)
+            unit = pixels.attrib.get("PhysicalSizeXUnit", "um").lower()
+            if "nano" in unit or unit.endswith("nm"):
+                value /= 1000.0
+            elif "milli" in unit or unit.endswith("mm"):
+                value *= 1000.0
+            pixel_size = value
+        return names, pixel_size
     if not ome.images:
         return names, pixel_size
     pixels = ome.images[0].pixels
@@ -167,6 +206,16 @@ def load_microscopy_image(path: str | Path) -> MicroscopyImage:
         image = _normalize_axes(array, series.axes, source)
         channel_names, pixel_size = _parse_ome_metadata(tif.ome_metadata, image.shape[0])
         photometric = series.pages[0].photometric.name if len(series.pages) else ""
+        if not any(channel_names) and series.axes.upper() == "QYX":
+            # The Olympus training exports store three fluorescence planes in
+            # display-color order and, for four-plane files, transmitted light.
+            # TIFF labels the page axis generically as Q because OME metadata was
+            # stripped.  Exposing explicit names lets downstream code reorder the
+            # fluorescence planes without ever treating transmitted light as a
+            # model channel.
+            channel_names = ["Cy5", "GFP", "DAPI"][: image.shape[0]]
+            if image.shape[0] == 4:
+                channel_names.append("Transmitted")
         if (
             not any(channel_names)
             and series.axes.upper() == "YXS"

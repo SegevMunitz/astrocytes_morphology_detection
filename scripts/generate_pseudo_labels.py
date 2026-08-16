@@ -116,6 +116,9 @@ def generate_pseudo_labels(
             str(row["gfap_channel"]),
             labels,
             float(data_config.get("max_nucleus_distance", 64.0)),
+            input_mode=str(data_config.get("input_mode", "nucleus_guidance")),
+            auxiliary_channel=str(row.get("auxiliary_channel", "")),
+            dapi_channel=str(row.get("dapi_channel", "")),
         )
         probabilities = predict_full_image(
             model,

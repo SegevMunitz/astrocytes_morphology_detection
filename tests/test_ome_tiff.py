@@ -106,6 +106,24 @@ def test_load_bmp_content_with_tif_suffix(tmp_path: Path) -> None:
     np.testing.assert_array_equal(get_channel(loaded, "Green"), array[..., 1])
 
 
+def test_generic_four_plane_training_tiff_gets_biological_channel_names(
+    tmp_path: Path,
+) -> None:
+    """Legacy QYX exports expose fluorescence planes plus transmitted light."""
+    path = tmp_path / "legacy_training.tif"
+    image = np.zeros((4, 12, 14), dtype=np.uint16)
+    image[0, 2:5, 3:7] = 20
+    image[1, 4:8, 5:9] = 30
+    image[2, 6:10, 7:11] = 40
+    image[3] = 200
+    tifffile.imwrite(path, image, metadata={"axes": "QYX"})
+
+    loaded = load_ome_tiff(path)
+
+    assert loaded.image.shape == (4, 12, 14)
+    assert loaded.channel_names == ["Cy5", "GFP", "DAPI", "Transmitted"]
+
+
 def test_manifest_discovers_bmp_tif_and_tiff_images(tmp_path: Path) -> None:
     """Dataset discovery should treat every supported microscopy suffix equally.
 

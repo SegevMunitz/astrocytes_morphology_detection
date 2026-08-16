@@ -81,6 +81,7 @@ def prepare_dataset(
             microscopy,
             str(row["gfap_channel"]),
             str(row["dapi_channel"]),
+            str(row.get("auxiliary_channel", "")),
         )
         gfap = get_channel(microscopy, selection.gfap_channel)
         dapi = get_channel(microscopy, selection.dapi_channel)
@@ -137,12 +138,14 @@ def prepare_dataset(
         )
 
         manifest.loc[index, "gfap_channel"] = selection.gfap_channel
+        manifest.loc[index, "auxiliary_channel"] = selection.auxiliary_channel
         manifest.loc[index, "dapi_channel"] = selection.dapi_channel
         manifest.loc[index, "cellpose_mask_path"] = _portable_path(label_path)
         records.append(
             {
                 "image_id": image_id,
                 "gfap_channel": selection.gfap_channel,
+                "auxiliary_channel": selection.auxiliary_channel,
                 "dapi_channel": selection.dapi_channel,
                 "channel_selection_method": selection.method,
                 "dapi_preprocessing": dapi_preprocessing,

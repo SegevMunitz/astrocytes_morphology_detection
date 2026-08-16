@@ -81,15 +81,23 @@ def map_cells_to_nuclei(
     return mapping
 
 
-def _cell_contact_boundaries(cells: np.ndarray) -> np.ndarray:
-    """Mark only interfaces where two different positive cell IDs touch.
+def _cell_contact_boundaries(cells: np.ndarray, max_gap: int = 2) -> np.ndarray:
+    """Mark interfaces where different cells touch or have a one-pixel gap.
 
-    Cell-to-background edges are intentionally excluded: otherwise every pixel
-    in a one-pixel-wide process would become boundary supervision and disappear.
+    Cellpose-style labels commonly leave a watershed line of background between
+    adjacent instances. Looking two pixels across that line supplies meaningful
+    positive boundary supervision while ordinary cell-to-background edges remain
+    excluded, preserving isolated one-pixel processes.
     """
     height, width = cells.shape
     boundary = np.zeros(cells.shape, dtype=bool)
-    for dy, dx in ((1, 0), (0, 1), (1, 1), (1, -1)):
+    shifts = [
+        (dy, dx)
+        for dy in range(0, max_gap + 1)
+        for dx in range(-max_gap, max_gap + 1)
+        if (dy > 0 or dx > 0) and max(abs(dy), abs(dx)) <= max_gap
+    ]
+    for dy, dx in shifts:
         first_y = slice(0, height - dy) if dy >= 0 else slice(-dy, height)
         second_y = slice(dy, height) if dy >= 0 else slice(0, height + dy)
         first_x = slice(0, width - dx) if dx >= 0 else slice(-dx, width)
@@ -99,6 +107,14 @@ def _cell_contact_boundaries(cells: np.ndarray) -> np.ndarray:
         contact = (first > 0) & (second > 0) & (first != second)
         boundary[first_y, first_x] |= contact
         boundary[second_y, second_x] |= contact
+        if max(abs(dy), abs(dx)) == 2:
+            midpoint_y = slice(
+                first_y.start + (1 if dy > 0 else 0),
+                first_y.stop + (1 if dy > 0 else 0),
+            )
+            x_step = 1 if dx > 0 else (-1 if dx < 0 else 0)
+            midpoint_x = slice(first_x.start + x_step, first_x.stop + x_step)
+            boundary[midpoint_y, midpoint_x] |= contact
     return boundary.astype(np.uint8)
 
 

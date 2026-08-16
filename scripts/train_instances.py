@@ -9,7 +9,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from astroseg.constants import TRAINABLE_ANNOTATION_STATUSES
-from astroseg.datasets import AstrocyteInstanceDataset, RandomInstanceFlip, collate_instance_batch
+from astroseg.datasets import (
+    AstrocyteInstanceDataset,
+    AstrocyteUnlabeledDataset,
+    RandomInstanceAugmentation,
+    collate_instance_batch,
+    collate_unlabeled_batch,
+)
 from astroseg.io import load_manifest, load_yaml_configuration
 from astroseg.models import build_model
 from astroseg.training import (
@@ -54,6 +60,18 @@ def _eligible_instance_rows(
     return result
 
 
+def _read_image_ids(path: Path) -> set[str]:
+    """Read a non-empty comment-aware image-ID list for an explicit split."""
+    values = {
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if not values:
+        raise ValueError(f"No image IDs in {path}")
+    return values
+
+
 def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, float | int]]:
     """Build grouped data loaders and train the complete-cell multi-head U-Net.
 
@@ -72,7 +90,32 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
     candidates = _eligible_instance_rows(manifest_path, statuses)
     cross_validation = configuration.get("cross_validation", {})
     output_directory = Path(configuration["output"]["directory"])
-    if cross_validation.get("enabled", True):
+    explicit_split = configuration.get("explicit_split", {})
+    if explicit_split.get("enabled", False):
+        training_ids = _read_image_ids(Path(explicit_split["train_ids_path"]))
+        validation_ids = _read_image_ids(Path(explicit_split["validation_ids_path"]))
+        overlap = training_ids & validation_ids
+        if overlap:
+            raise ValueError(f"Explicit train/validation lists overlap: {sorted(overlap)}")
+        candidate_ids = set(candidates["image_id"].astype(str))
+        listed_ids = training_ids | validation_ids
+        if listed_ids != candidate_ids:
+            raise ValueError(
+                "Explicit split must cover every labeled candidate exactly; "
+                f"missing={sorted(candidate_ids - listed_ids)}, "
+                f"unknown={sorted(listed_ids - candidate_ids)}"
+            )
+        train_manifest = candidates.loc[candidates["image_id"].isin(training_ids)].copy()
+        validation_manifest = candidates.loc[
+            candidates["image_id"].isin(validation_ids)
+        ].copy()
+        train_manifest["split"] = "train"
+        validation_manifest["split"] = "val"
+        output_directory.mkdir(parents=True, exist_ok=True)
+        pd.concat((train_manifest, validation_manifest), ignore_index=True).to_csv(
+            output_directory / "cross_validation_assignments.csv", index=False
+        )
+    elif cross_validation.get("enabled", True):
         group_column = str(cross_validation.get("group_column", "image_id"))
         fold_column = str(cross_validation.get("fold_column", "fold"))
         n_splits = int(cross_validation.get("n_splits", 5))
@@ -106,9 +149,18 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         "offset_scale": float(data.get("offset_scale", 256)),
         "annotation_statuses": statuses,
         "manifest_base_directory": manifest_path.parent,
+        "input_mode": str(data.get("input_mode", "nucleus_guidance")),
     }
+    augmentation = configuration.get("augmentation", {})
     train_dataset = AstrocyteInstanceDataset(
-        train_manifest, "train", augmentation=RandomInstanceFlip(), **common
+        train_manifest,
+        "train",
+        augmentation=RandomInstanceAugmentation(
+            auxiliary_dropout_probability=float(
+                augmentation.get("auxiliary_dropout_probability", 0)
+            )
+        ),
+        **common,
     )
     validation_dataset = AstrocyteInstanceDataset(
         validation_manifest, "val", augmentation=None, **common
@@ -120,6 +172,25 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
     }
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
     validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
+    unlabeled_loader = None
+    semi_supervised = configuration.get("semi_supervised", {})
+    if semi_supervised.get("enabled", False):
+        complete_manifest = load_manifest(manifest_path)
+        unlabeled_dataset = AstrocyteUnlabeledDataset(
+            complete_manifest,
+            patch_size=int(data["patch_size"]),
+            overlap=int(data["overlap"]),
+            max_nucleus_distance=float(data.get("max_nucleus_distance", 64)),
+            manifest_base_directory=manifest_path.parent,
+            input_mode=str(data.get("input_mode", "fluorescence")),
+        )
+        unlabeled_loader = DataLoader(
+            unlabeled_dataset,
+            batch_size=int(configuration["training"]["batch_size"]),
+            shuffle=True,
+            num_workers=int(data.get("num_workers", 0)),
+            collate_fn=collate_unlabeled_batch,
+        )
     model = build_model(
         str(model_configuration["architecture"]),
         int(model_configuration["input_channels"]),
@@ -131,6 +202,8 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         float(loss.get("semantic_weight", 1)),
         float(loss.get("boundary_weight", 1)),
         float(loss.get("offset_weight", 1)),
+        loss.get("semantic_class_weights"),
+        loss.get("boundary_class_weights"),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return train_instance_model(
@@ -141,6 +214,7 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         configuration,
         output_directory,
         device,
+        unlabeled_loader=unlabeled_loader,
     )
 
 
@@ -153,7 +227,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--fold", type=int)
+    parser.add_argument("--train-id-list", type=Path)
+    parser.add_argument("--validation-id-list", type=Path)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--disable-lr-scheduler", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--smoke-steps", type=int, default=20)
@@ -174,6 +252,16 @@ def main() -> None:
     if args.config is None:
         raise SystemExit("--config is required unless --smoke-test is used")
     configuration = load_configuration(args.config)
+    if (args.train_id_list is None) != (args.validation_id_list is None):
+        raise SystemExit("--train-id-list and --validation-id-list must be supplied together")
+    if args.train_id_list is not None:
+        if args.fold is not None:
+            raise SystemExit("An explicit train/validation split cannot be combined with --fold")
+        configuration["explicit_split"] = {
+            "enabled": True,
+            "train_ids_path": str(args.train_id_list),
+            "validation_ids_path": str(args.validation_id_list),
+        }
     if args.fold is not None:
         configuration.setdefault("cross_validation", {})["enabled"] = True
         configuration["cross_validation"]["validation_fold"] = args.fold
@@ -181,6 +269,12 @@ def main() -> None:
         if args.epochs <= 0:
             raise SystemExit("--epochs must be positive")
         configuration["training"]["epochs"] = args.epochs
+    if args.learning_rate is not None:
+        if args.learning_rate <= 0:
+            raise SystemExit("--learning-rate must be positive")
+        configuration["training"]["learning_rate"] = args.learning_rate
+    if args.disable_lr_scheduler:
+        configuration["training"]["lr_scheduler_enabled"] = False
     if args.output_dir is not None:
         configuration["output"]["directory"] = str(args.output_dir)
     history = train_from_configuration(configuration)

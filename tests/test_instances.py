@@ -4,13 +4,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import tifffile
 import torch
 
 from astroseg.annotations import import_astrocyte_instance_pair
 from astroseg.constants import MANIFEST_COLUMNS
-from astroseg.datasets import AstrocyteInstanceDataset, RandomInstanceFlip
-from astroseg.models import NucleusGuidedInstanceUNet
+from astroseg.datasets import (
+    AstrocyteInstanceDataset,
+    RandomInstanceAugmentation,
+    RandomInstanceFlip,
+)
+from astroseg.models import MultichannelInstanceUNet, NucleusGuidedInstanceUNet
 from astroseg.postprocessing import separate_astrocyte_instances
 from astroseg.preprocessing import build_astrocyte_instance_targets
 from astroseg.training import (
@@ -238,6 +243,17 @@ def test_instance_model_and_loss_cover_all_three_heads() -> None:
     assert model.offset_output.weight.grad is not None
 
 
+def test_multichannel_residual_model_requires_three_planes_and_all_heads() -> None:
+    """The production model preserves odd image sizes and its input contract."""
+    model = MultichannelInstanceUNet(base_channels=8)
+    outputs = model(torch.rand(1, 3, 33, 35))
+    assert outputs["semantic_logits"].shape == (1, 4, 33, 35)
+    assert outputs["boundary_logits"].shape == (1, 2, 33, 35)
+    assert outputs["offsets"].shape == (1, 2, 33, 35)
+    with pytest.raises(ValueError, match="exactly three"):
+        MultichannelInstanceUNet(input_channels=4)
+
+
 def test_instance_flip_corrects_ownership_vector_signs() -> None:
     """Spatial flips must negate only the matching offset component.
 
@@ -258,6 +274,32 @@ def test_instance_flip_corrects_ownership_vector_signs() -> None:
     np.testing.assert_array_equal(transformed_image, image[..., ::-1, ::-1])
     assert np.all(transformed["offsets"][0] == -2)
     assert np.all(transformed["offsets"][1] == -3)
+
+
+def test_instance_augmentation_can_drop_only_the_auxiliary_plane() -> None:
+    """GFP dropout should reproduce two-channel acquisitions without misalignment."""
+    image = np.stack(
+        [np.full((3, 4), value, dtype=np.float32) for value in (0.2, 0.4, 0.6)]
+    )
+    targets = {
+        "semantic": np.zeros((3, 4), dtype=np.uint8),
+        "boundary": np.zeros((3, 4), dtype=np.uint8),
+        "offsets": np.zeros((2, 3, 4), dtype=np.float32),
+        "offset_mask": np.zeros((3, 4), dtype=np.float32),
+        "instances": np.zeros((3, 4), dtype=np.uint16),
+    }
+    augmentation = RandomInstanceAugmentation(
+        horizontal_probability=0,
+        vertical_probability=0,
+        rotation_probability=0,
+        intensity_probability=0,
+        auxiliary_dropout_probability=1,
+    )
+    transformed, transformed_targets = augmentation(image, targets)
+    np.testing.assert_array_equal(transformed[0], image[0])
+    np.testing.assert_array_equal(transformed[1], 0)
+    np.testing.assert_array_equal(transformed[2], image[2])
+    np.testing.assert_array_equal(transformed_targets["semantic"], targets["semantic"])
 
 
 def test_learned_offsets_assign_long_processes_to_their_nuclei() -> None:

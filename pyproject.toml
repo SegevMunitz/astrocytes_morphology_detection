@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "matplotlib>=3.8",
+    "lxml>=5.0",
     "numpy>=1.26",
     "ome-types>=0.5",
+    "openpyxl>=3.1",
     "pandas>=2.1",
     "Pillow>=10.0",
     "pydantic>=2.5",

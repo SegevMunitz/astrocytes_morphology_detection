@@ -50,6 +50,102 @@ def collate_instance_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def collate_unlabeled_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    """Stack unlabeled image patches while retaining their source identities."""
+    if not batch:
+        raise ValueError("Cannot collate an empty unlabeled batch")
+    return {
+        "image": torch.stack([item["image"] for item in batch]),
+        "image_id": [item["image_id"] for item in batch],
+        "coordinates": [item["coordinates"] for item in batch],
+    }
+
+
+class AstrocyteUnlabeledDataset(Dataset[dict[str, Any]]):
+    """Expose three-channel patches from training images without cell masks."""
+
+    def __init__(
+        self,
+        manifest: pd.DataFrame,
+        patch_size: int = 512,
+        overlap: int = 64,
+        max_nucleus_distance: float = 64.0,
+        manifest_base_directory: str | Path | None = None,
+        input_mode: str = "fluorescence",
+    ) -> None:
+        """Index unannotated train rows for consistency-based learning only."""
+        frame = manifest.copy()
+        validate_manifest(frame)
+        selected = (frame["split"] == "train") & (frame["annotation_status"] == "none")
+        self.manifest = frame.loc[selected].reset_index(drop=True)
+        if self.manifest.empty:
+            raise ValueError("Manifest contains no unlabeled training images")
+        self.patch_size = patch_size
+        self.overlap = overlap
+        self.max_nucleus_distance = max_nucleus_distance
+        self.input_mode = input_mode
+        self.base_directory = (
+            Path(manifest_base_directory) if manifest_base_directory else Path.cwd()
+        )
+        self._records: list[dict[str, Any]] = []
+        self._record_cache: dict[int, np.ndarray] = {}
+        for row_index, row in self.manifest.iterrows():
+            image_path = _resolve_existing_path(
+                str(row["path"]), self.base_directory, "image"
+            )
+            nucleus_path = _resolve_existing_path(
+                str(row["cellpose_mask_path"]), self.base_directory, "nucleus mask"
+            )
+            microscopy = load_ome_tiff(image_path)
+            coordinates = generate_patch_coordinates(
+                microscopy.image.shape[-2:], patch_size, overlap
+            )
+            self._records.append(
+                {
+                    "row_index": row_index,
+                    "image_path": image_path,
+                    "nucleus_path": nucleus_path,
+                    "coordinates": coordinates,
+                }
+            )
+            nuclei = _load_2d_array(nucleus_path)
+            inputs = prepare_model_inputs(
+                microscopy,
+                str(row["gfap_channel"]),
+                nuclei,
+                self.max_nucleus_distance,
+                input_mode=self.input_mode,
+                auxiliary_channel=str(row.get("auxiliary_channel", "")),
+                dapi_channel=str(row.get("dapi_channel", "")),
+            )
+            self._record_cache[len(self._records) - 1] = inputs
+        self._patch_index = [
+            (record_index, coordinate)
+            for record_index, record in enumerate(self._records)
+            for coordinate in record["coordinates"]
+        ]
+
+    def __len__(self) -> int:
+        """Return the number of deterministic unlabeled image patches."""
+        return len(self._patch_index)
+
+    def _load_record(self, record_index: int) -> np.ndarray:
+        """Load and cache canonical fluorescence inputs for one source image."""
+        return self._record_cache[record_index]
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return one raw patch for teacher/student photometric perturbations."""
+        record_index, coordinate = self._patch_index[index]
+        inputs = self._load_record(record_index)
+        patch = extract_patch(inputs, coordinate)
+        row_index = self._records[record_index]["row_index"]
+        return {
+            "image": torch.from_numpy(np.ascontiguousarray(patch)).float(),
+            "image_id": str(self.manifest.iloc[row_index]["image_id"]),
+            "coordinates": coordinate,
+        }
+
+
 class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
     """Provide inputs and ownership-aware targets for individual astrocytes.
 
@@ -69,6 +165,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
         augmentation: InstanceAugmentation | None = None,
         annotation_statuses: Collection[str] | None = TRAINABLE_ANNOTATION_STATUSES,
         manifest_base_directory: str | Path | None = None,
+        input_mode: str = "nucleus_guidance",
     ) -> None:
         """Validate aligned instance files and index deterministic image patches.
 
@@ -103,6 +200,7 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
         self.soma_radius = soma_radius
         self.offset_scale = offset_scale
         self.augmentation = augmentation
+        self.input_mode = input_mode
         self._records: list[dict[str, Any]] = []
         self._record_cache: dict[int, tuple[np.ndarray, AstrocyteInstanceTargets]] = {}
 
@@ -142,6 +240,9 @@ class AstrocyteInstanceDataset(Dataset[dict[str, Any]]):
                 str(row["gfap_channel"]),
                 nuclei,
                 max_nucleus_distance,
+                input_mode=input_mode,
+                auxiliary_channel=str(row.get("auxiliary_channel", "")),
+                dapi_channel=str(row.get("dapi_channel", "")),
             )
             coordinates = generate_patch_coordinates(
                 microscopy.image.shape[-2:], patch_size, overlap

@@ -3,6 +3,7 @@ seed: 42
 
 data:
   manifest_path: data/metadata/manifest.csv
+  input_mode: fluorescence
   patch_size: 512
   overlap: 64
   num_workers: 0
@@ -15,10 +16,10 @@ data:
     - reviewed
 
 model:
-  architecture: nucleus_guided_instance_unet
+  architecture: multichannel_instance_unet
   input_channels: 3
   num_classes: 4
-  base_channels: 32
+  base_channels: 24
 
 training:
   epochs: 100
@@ -26,11 +27,26 @@ training:
   learning_rate: 0.0003
   weight_decay: 0.0001
   early_stopping_patience: 15
+  lr_patience: 5
+  lr_reduce_factor: 0.5
+  minimum_learning_rate: 0.000001
 
 loss:
   semantic_weight: 1.0
   boundary_weight: 1.0
   offset_weight: 2.0
+  semantic_class_weights: [0.25, 1.5, 1.0, 1.0]
+  boundary_class_weights: [0.2, 2.0]
+
+augmentation:
+  auxiliary_dropout_probability: 0.5
+
+semi_supervised:
+  enabled: false
+  consistency_weight: 0.25
+  confidence_threshold: 0.8
+  ema_decay: 0.99
+  ramp_epochs: 10
 
 cross_validation:
   enabled: true

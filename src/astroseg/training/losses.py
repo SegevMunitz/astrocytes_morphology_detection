@@ -3,6 +3,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from collections.abc import Sequence
 
 
 class DiceLoss(nn.Module):
@@ -62,6 +63,7 @@ class CrossEntropyDiceLoss(nn.Module):
         cross_entropy_weight: float = 1.0,
         dice_weight: float = 1.0,
         include_background: bool = False,
+        class_weights: Sequence[float] | None = None,
     ) -> None:
         """Configure component weights and the internal Dice-loss policy.
 
@@ -74,6 +76,10 @@ class CrossEntropyDiceLoss(nn.Module):
         self.cross_entropy_weight = cross_entropy_weight
         self.dice_weight = dice_weight
         self.dice = DiceLoss(include_background=include_background)
+        weights = None if class_weights is None else torch.tensor(class_weights, dtype=torch.float32)
+        if weights is not None and (weights.ndim != 1 or torch.any(weights <= 0)):
+            raise ValueError("class_weights must be a one-dimensional positive sequence")
+        self.register_buffer("class_weights", weights)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the configured weighted loss for one prediction batch.
@@ -81,7 +87,9 @@ class CrossEntropyDiceLoss(nn.Module):
         Logits and integer class targets are passed to both component losses, and
         their weighted scalar values are summed for optimization.
         """
-        cross_entropy = F.cross_entropy(logits, target.long())
+        if self.class_weights is not None and len(self.class_weights) != logits.shape[1]:
+            raise ValueError("class_weights length must match the number of logit classes")
+        cross_entropy = F.cross_entropy(logits, target.long(), weight=self.class_weights)
         return self.cross_entropy_weight * cross_entropy + self.dice_weight * self.dice(logits, target)
 
 
@@ -97,6 +105,8 @@ class NucleusGuidedInstanceLoss(nn.Module):
         semantic_weight: float = 1.0,
         boundary_weight: float = 1.0,
         offset_weight: float = 1.0,
+        semantic_class_weights: Sequence[float] | None = None,
+        boundary_class_weights: Sequence[float] | None = None,
     ) -> None:
         """Configure non-negative task weights with at least one active objective.
 
@@ -110,8 +120,8 @@ class NucleusGuidedInstanceLoss(nn.Module):
         self.semantic_weight = semantic_weight
         self.boundary_weight = boundary_weight
         self.offset_weight = offset_weight
-        self.semantic_loss = CrossEntropyDiceLoss()
-        self.boundary_loss = CrossEntropyDiceLoss()
+        self.semantic_loss = CrossEntropyDiceLoss(class_weights=semantic_class_weights)
+        self.boundary_loss = CrossEntropyDiceLoss(class_weights=boundary_class_weights)
 
     def forward(
         self,

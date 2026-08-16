@@ -3,6 +3,7 @@
 from astroseg.preprocessing.channels import (
     ChannelSelection,
     prepare_dapi_for_detection,
+    prepare_fluorescence_inputs,
     select_model_channels,
 )
 from astroseg.preprocessing.distance_maps import create_nucleus_proximity_map
@@ -38,6 +39,7 @@ __all__ = [
     "map_cells_to_nuclei",
     "percentile_normalize",
     "prepare_dapi_for_detection",
+    "prepare_fluorescence_inputs",
     "select_model_channels",
     "stitch_probability_patches",
     "validate_nucleus_labels",

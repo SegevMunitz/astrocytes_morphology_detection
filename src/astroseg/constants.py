@@ -8,6 +8,7 @@ MANIFEST_COLUMNS = [
     "magnification",
     "path",
     "gfap_channel",
+    "auxiliary_channel",
     "dapi_channel",
     "cellpose_mask_path",
     "annotation_path",

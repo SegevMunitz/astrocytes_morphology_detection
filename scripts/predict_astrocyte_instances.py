@@ -1,7 +1,9 @@
 """Predict complete individual astrocytes with a trained nucleus-guided model."""
 
 import argparse
+import json
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -11,7 +13,7 @@ import torch
 
 from astroseg.analysis import astrocyte_instance_morphology
 from astroseg.datasets import prepare_model_inputs
-from astroseg.inference import predict_instance_full_image
+from astroseg.inference import InstanceHeadPredictions, predict_instance_full_image
 from astroseg.io import (
     get_channel,
     load_manifest,
@@ -66,7 +68,7 @@ def _load_labels(path: Path) -> np.ndarray:
 
 def predict_split(
     configuration: dict[str, Any],
-    checkpoint_path: Path,
+    checkpoint_paths: Path | Sequence[Path],
     split: str,
     output_directory: Path,
     output_manifest: Path,
@@ -78,15 +80,22 @@ def predict_split(
     annotation columns remain untouched for correction and evaluation provenance.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = load_checkpoint(checkpoint_path, device)
     model_configuration = configuration["model"]
-    model = build_model(
-        str(model_configuration["architecture"]),
-        int(model_configuration["input_channels"]),
-        int(model_configuration["num_classes"]),
-        int(model_configuration.get("base_channels", 32)),
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    paths = [checkpoint_paths] if isinstance(checkpoint_paths, Path) else list(checkpoint_paths)
+    if not paths:
+        raise ValueError("At least one checkpoint is required")
+    models = []
+    for checkpoint_path in paths:
+        checkpoint = load_checkpoint(checkpoint_path, device)
+        model = build_model(
+            str(model_configuration["architecture"]),
+            int(model_configuration["input_channels"]),
+            int(model_configuration["num_classes"]),
+            int(model_configuration.get("base_channels", 32)),
+        ).to(device)
+        model.load_state_dict(checkpoint["model_state"])
+        model.eval()
+        models.append(model)
     data = configuration["data"]
     manifest_path = Path(data["manifest_path"])
     manifest = load_manifest(manifest_path)
@@ -111,13 +120,30 @@ def predict_split(
             str(row["gfap_channel"]),
             nuclei,
             float(data.get("max_nucleus_distance", 64)),
+            input_mode=str(data.get("input_mode", "nucleus_guidance")),
+            auxiliary_channel=str(row.get("auxiliary_channel", "")),
+            dapi_channel=str(row.get("dapi_channel", "")),
         )
-        heads = predict_instance_full_image(
-            model,
-            inputs,
-            int(data["patch_size"]),
-            int(data["overlap"]),
-            device,
+        head_predictions = [
+            predict_instance_full_image(
+                model,
+                inputs,
+                int(data["patch_size"]),
+                int(data["overlap"]),
+                device,
+            )
+            for model in models
+        ]
+        heads = InstanceHeadPredictions(
+            semantic_probabilities=np.mean(
+                [value.semantic_probabilities for value in head_predictions], axis=0
+            ).astype(np.float32),
+            boundary_probability=np.mean(
+                [value.boundary_probability for value in head_predictions], axis=0
+            ).astype(np.float32),
+            ownership_offsets=np.mean(
+                [value.ownership_offsets for value in head_predictions], axis=0
+            ).astype(np.float32),
         )
         result = separate_astrocyte_instances(
             1.0 - heads.semantic_probabilities[0],
@@ -169,7 +195,11 @@ def predict_split(
         manifest.loc[index, "predicted_instance_path"] = _portable_path(label_path)
         manifest.loc[index, "predicted_compartment_path"] = _portable_path(compartment_path)
         manifest.loc[index, "instance_prediction_status"] = "automatic"
-        manifest.loc[index, "instance_prediction_source"] = "nucleus_guided_instance_unet"
+        manifest.loc[index, "instance_prediction_source"] = (
+            "multichannel_instance_unet_ensemble"
+            if len(models) > 1
+            else "multichannel_instance_unet"
+        )
         reports.append(
             {
                 "image_id": image_id,
@@ -177,6 +207,7 @@ def predict_split(
                 "active_nucleus_count": result.active_nucleus_count,
                 "unassigned_foreground_fraction": result.unassigned_foreground_fraction,
                 "ownership_mode": result.ownership_mode,
+                "ensemble_size": len(models),
             }
         )
     validate_manifest(manifest)
@@ -198,7 +229,12 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/train_instances.yaml"))
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, nargs="+", required=True)
+    parser.add_argument(
+        "--evaluation",
+        type=Path,
+        help="Evaluation JSON containing selected foreground and boundary thresholds",
+    )
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/instance_predictions"))
     parser.add_argument(
@@ -214,8 +250,22 @@ def main() -> None:
     A concise image count is printed only after every artifact and manifest writes.
     """
     args = parse_args()
+    configuration = _load_yaml(args.config)
+    if args.evaluation is not None:
+        evaluation = json.loads(args.evaluation.read_text(encoding="utf-8"))
+        postprocessing = configuration.setdefault("postprocessing", {})
+        postprocessing["foreground_threshold"] = float(
+            evaluation["best_foreground_threshold"]
+        )
+        postprocessing["boundary_threshold"] = float(
+            evaluation["best_boundary_threshold"]
+        )
+        if "best_max_nucleus_to_gfap_distance" in evaluation:
+            postprocessing["max_nucleus_to_gfap_distance"] = float(
+                evaluation["best_max_nucleus_to_gfap_distance"]
+            )
     manifest = predict_split(
-        _load_yaml(args.config),
+        configuration,
         args.checkpoint,
         args.split,
         args.output_dir,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=astroseg-train
+#SBATCH --job-name=astroseg-compare
 #SBATCH --partition=gpu.q
 #SBATCH --qos=gpu-qos
 #SBATCH --constraint=A100
@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
-#SBATCH --output=cluster_logs/%x_%A_%a.out
-#SBATCH --error=cluster_logs/%x_%A_%a.err
+#SBATCH --output=cluster_logs/%x_%j.out
+#SBATCH --error=cluster_logs/%x_%j.err
 
 set -euo pipefail
 
@@ -27,14 +27,14 @@ export MPLBACKEND=Agg
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export PYTHONUNBUFFERED=1
 
-fold="${SLURM_ARRAY_TASK_ID:-${ASTROSEG_FOLD:-0}}"
 epochs="${ASTROSEG_EPOCHS:-100}"
-run_name="${ASTROSEG_RUN_NAME:-multichannel_cross_validation}"
-output_dir="${data_root}/outputs/checkpoints/${run_name}/fold_${fold}"
+run_name="${ASTROSEG_RUN_NAME:-multichannel_cellpose_split}"
+output_dir="${data_root}/outputs/checkpoints/${run_name}/fold_cellpose_split"
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
 python scripts/train_instances.py \
     --config configs/train_instances_cluster.yaml \
-    --fold "${fold}" \
+    --train-id-list configs/cellpose_split_original_channels/train_ids.txt \
+    --validation-id-list configs/cellpose_split_original_channels/validation_ids.txt \
     --epochs "${epochs}" \
     --output-dir "${output_dir}"

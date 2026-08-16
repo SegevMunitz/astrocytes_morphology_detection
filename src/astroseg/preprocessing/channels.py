@@ -19,6 +19,7 @@ class ChannelSelection:
     gfap_channel: str
     dapi_channel: str
     method: str
+    auxiliary_channel: str = ""
     red_score: float | None = None
     green_score: float | None = None
 
@@ -35,6 +36,18 @@ def _find_named_channel(microscopy_image: MicroscopyImage, aliases: tuple[str, .
         if name is not None:
             get_channel(microscopy_image, name)
             return name
+    for alias in aliases:
+        prefix = alias.casefold()
+        matches = [
+            name
+            for name in microscopy_image.channel_names
+            if name and name.casefold().startswith((prefix + " ", prefix + "_", prefix + "-"))
+        ]
+        if len(matches) == 1:
+            get_channel(microscopy_image, matches[0])
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Channel alias {alias!r} matches several channels: {matches}")
     return None
 
 
@@ -56,6 +69,7 @@ def select_model_channels(
     microscopy_image: MicroscopyImage,
     gfap_channel: str = "",
     dapi_channel: str = "",
+    auxiliary_channel: str = "",
 ) -> ChannelSelection:
     """Resolve GFAP and DAPI channels without per-image manual extraction.
 
@@ -64,23 +78,47 @@ def select_model_channels(
     """
     explicit_gfap = gfap_channel.strip()
     explicit_dapi = dapi_channel.strip()
+    explicit_auxiliary = auxiliary_channel.strip()
     if explicit_gfap:
         get_channel(microscopy_image, explicit_gfap)
     if explicit_dapi:
         get_channel(microscopy_image, explicit_dapi)
+    if explicit_auxiliary:
+        get_channel(microscopy_image, explicit_auxiliary)
     if explicit_gfap and explicit_dapi:
-        if explicit_gfap.casefold() == explicit_dapi.casefold():
-            raise ValueError("GFAP and DAPI must refer to different channels")
-        return ChannelSelection(explicit_gfap, explicit_dapi, "manifest")
+        selected = [explicit_gfap, explicit_dapi]
+        if explicit_auxiliary:
+            selected.append(explicit_auxiliary)
+        if len({value.casefold() for value in selected}) != len(selected):
+            raise ValueError("GFAP, auxiliary, and DAPI must refer to different channels")
+        return ChannelSelection(
+            explicit_gfap,
+            explicit_dapi,
+            "manifest",
+            auxiliary_channel=explicit_auxiliary,
+        )
 
     resolved_dapi = explicit_dapi or _find_named_channel(
         microscopy_image, ("DAPI", "Hoechst", "Blue")
     )
-    resolved_gfap = explicit_gfap or _find_named_channel(microscopy_image, ("GFAP",))
+    resolved_gfap = explicit_gfap or _find_named_channel(
+        microscopy_image, ("GFAP", "Cy5", "Far Red")
+    )
+    resolved_auxiliary = explicit_auxiliary or _find_named_channel(
+        microscopy_image, ("GFP", "FITC", "Green")
+    )
     if resolved_gfap and resolved_dapi:
-        if resolved_gfap.casefold() == resolved_dapi.casefold():
-            raise ValueError("Automatically selected GFAP and DAPI channels are identical")
-        return ChannelSelection(resolved_gfap, resolved_dapi, "named_metadata")
+        selected = [resolved_gfap, resolved_dapi]
+        if resolved_auxiliary:
+            selected.append(resolved_auxiliary)
+        if len({value.casefold() for value in selected}) != len(selected):
+            raise ValueError("Automatically selected model channels are not distinct")
+        return ChannelSelection(
+            resolved_gfap,
+            resolved_dapi,
+            "named_metadata",
+            auxiliary_channel=resolved_auxiliary or "",
+        )
 
     names = {name.casefold(): name for name in microscopy_image.channel_names if name}
     if {"red", "green", "blue"}.issubset(names):
@@ -99,6 +137,11 @@ def select_model_channels(
             resolved_gfap,
             resolved_dapi,
             "rgb_signal",
+            auxiliary_channel=(
+                green_name
+                if resolved_gfap.casefold() == red_name.casefold()
+                else red_name
+            ),
             red_score=red_score,
             green_score=green_score,
         )
@@ -107,6 +150,39 @@ def select_model_channels(
         "Could not determine GFAP and DAPI channels automatically. "
         f"Available names: {microscopy_image.channel_names}"
     )
+
+
+def prepare_fluorescence_inputs(
+    microscopy_image: MicroscopyImage,
+    gfap_channel: str = "",
+    auxiliary_channel: str = "",
+    dapi_channel: str = "",
+) -> tuple[np.ndarray, ChannelSelection]:
+    """Return normalized GFAP, auxiliary, and DAPI planes in a fixed order.
+
+    The optional auxiliary fluorescence plane is zero-filled when an acquisition
+    contains only GFAP/Cy5 and DAPI.  This preserves the exact three-channel model
+    contract across the two- and three-fluorophore test images without inventing
+    signal or changing the biological meaning of the other planes.
+    """
+    selection = select_model_channels(
+        microscopy_image,
+        gfap_channel=gfap_channel,
+        dapi_channel=dapi_channel,
+        auxiliary_channel=auxiliary_channel,
+    )
+    gfap = percentile_normalize(get_channel(microscopy_image, selection.gfap_channel))
+    dapi = percentile_normalize(get_channel(microscopy_image, selection.dapi_channel))
+    if selection.auxiliary_channel:
+        auxiliary = percentile_normalize(
+            get_channel(microscopy_image, selection.auxiliary_channel)
+        )
+    else:
+        auxiliary = np.zeros(gfap.shape, dtype=np.float32)
+    inputs = np.stack((gfap, auxiliary, dapi)).astype(np.float32, copy=False)
+    if inputs.shape[0] != 3 or not np.isfinite(inputs).all():
+        raise ValueError("Prepared fluorescence input must be finite with shape [3, H, W]")
+    return inputs, selection
 
 
 def prepare_dapi_for_detection(

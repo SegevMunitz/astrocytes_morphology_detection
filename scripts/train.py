@@ -51,6 +51,7 @@ def train_from_configuration(configuration: dict[str, Any]) -> list[dict[str, fl
         "max_nucleus_distance": float(data_config.get("max_nucleus_distance", 64.0)),
         "annotation_statuses": annotation_statuses,
         "num_classes": int(model_config["num_classes"]),
+        "input_mode": str(data_config.get("input_mode", "nucleus_guidance")),
     }
     cross_validation = configuration.get("cross_validation", {})
     if cross_validation.get("enabled", False):

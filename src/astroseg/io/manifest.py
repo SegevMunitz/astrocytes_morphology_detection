@@ -8,7 +8,11 @@ from pydantic import BaseModel, ConfigDict
 from astroseg.constants import ANNOTATION_STATUSES, MANIFEST_COLUMNS, VALID_SPLITS
 
 
-INSTANCE_COLUMNS = ("instance_annotation_path", "compartment_annotation_path")
+BACKWARD_COMPATIBLE_COLUMNS = (
+    "auxiliary_channel",
+    "instance_annotation_path",
+    "compartment_annotation_path",
+)
 
 
 class ManifestRow(BaseModel):
@@ -27,6 +31,7 @@ class ManifestRow(BaseModel):
     magnification: str = ""
     path: str
     gfap_channel: str = ""
+    auxiliary_channel: str = ""
     dapi_channel: str = ""
     cellpose_mask_path: str = ""
     annotation_path: str = ""
@@ -45,13 +50,13 @@ def validate_manifest(manifest: pd.DataFrame) -> None:
     The check covers required columns, unique image IDs, primary image paths,
     split values, annotation states, and required paths for annotated rows.
     """
-    for column in INSTANCE_COLUMNS:
+    for column in BACKWARD_COMPATIBLE_COLUMNS:
         if column not in manifest.columns:
             manifest[column] = ""
     missing = [
         column
         for column in MANIFEST_COLUMNS
-        if column not in manifest.columns and column not in INSTANCE_COLUMNS
+        if column not in manifest.columns and column not in BACKWARD_COMPATIBLE_COLUMNS
     ]
     if missing:
         raise ValueError(f"Manifest is missing required columns: {missing}")
@@ -92,7 +97,7 @@ def load_manifest(path: str | Path) -> pd.DataFrame:
     if not source.is_file():
         raise FileNotFoundError(f"Manifest does not exist: {source}")
     manifest = pd.read_csv(source, dtype=str, keep_default_na=False)
-    for column in INSTANCE_COLUMNS:
+    for column in BACKWARD_COMPATIBLE_COLUMNS:
         if column not in manifest.columns:
             manifest[column] = ""
     validate_manifest(manifest)
