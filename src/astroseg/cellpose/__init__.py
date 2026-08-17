@@ -1,6 +1,6 @@
-"""Backward-compatible imports for the isolated Cellpose workflow."""
+"""Cellpose refinement utilities, isolated from the independent model stack."""
 
-from astroseg.cellpose import (
+from astroseg.cellpose.transfer import (
     expand_cellpose_input_weights,
     prepare_three_channel_cellpose_image,
 )

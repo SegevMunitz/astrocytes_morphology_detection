@@ -9,7 +9,7 @@ import tifffile
 import torch
 from cellpose import io, models
 
-from astroseg.models import prepare_three_channel_cellpose_image
+from astroseg.cellpose import prepare_three_channel_cellpose_image
 from astroseg.visualization import save_instance_overlay
 
 

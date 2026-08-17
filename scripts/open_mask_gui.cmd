@@ -15,6 +15,7 @@ if not exist "%ASTROSEG_PYTHON%" (
   --masks "Cyto2=.astroseg_gui\comparison\masks\cyto2" ^
   --masks "Cyto3=.astroseg_gui\comparison\masks\cyto3" ^
   --masks "New 3-channel=.astroseg_gui\comparison\masks\three_channel" ^
+  --masks "AstroSeg v2=.astroseg_gui\comparison\masks\astroseg_v2" ^
   --ground-truth .astroseg_gui\comparison\ground_truth ^
   --corrections .astroseg_gui\comparison\corrections
 

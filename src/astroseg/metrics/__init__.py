@@ -1,6 +1,6 @@
-"""Backward-compatible imports for metrics moved to the shared namespace."""
+"""Metrics shared by independent and pretrained-model workflows."""
 
-from astroseg.metrics import (
+from astroseg.metrics.instances import (
     instance_segmentation_metrics,
     match_instances,
     process_ownership_accuracy,

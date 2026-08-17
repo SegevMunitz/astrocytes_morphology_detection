@@ -13,8 +13,8 @@ import tifffile
 import torch
 from cellpose import io, models
 
-from astroseg.models import prepare_three_channel_cellpose_image
-from astroseg.training import instance_segmentation_metrics
+from astroseg.cellpose import prepare_three_channel_cellpose_image
+from astroseg.metrics import instance_segmentation_metrics
 
 
 def _read_ids(path: Path) -> list[str]:

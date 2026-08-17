@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from cellpose import io, models, train
 
-from astroseg.models import (
+from astroseg.cellpose import (
     expand_cellpose_input_weights,
     prepare_three_channel_cellpose_image,
 )

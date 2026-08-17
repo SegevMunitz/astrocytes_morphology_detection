@@ -15,7 +15,7 @@ from astroseg.gui import (
     save_corrected_instances,
 )
 from astroseg.io import load_ome_tiff
-from astroseg.training import instance_segmentation_metrics
+from astroseg.metrics import instance_segmentation_metrics
 
 
 def _model_specification(value: str) -> tuple[str, Path]:

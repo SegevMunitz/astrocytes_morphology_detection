@@ -19,7 +19,7 @@ from astroseg.inference import InstanceHeadPredictions, predict_instance_full_im
 from astroseg.io import load_ome_tiff
 from astroseg.models import build_model
 from astroseg.postprocessing import AstrocyteInstanceResult, separate_astrocyte_instances
-from astroseg.training import instance_segmentation_metrics
+from astroseg.metrics import instance_segmentation_metrics
 from astroseg.training.checkpoints import load_checkpoint
 
 

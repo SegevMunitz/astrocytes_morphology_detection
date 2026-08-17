@@ -27,6 +27,10 @@ train_directory="${task_root}/train"
 validation_directory="${task_root}/validation"
 result_directory="${task_root}/result"
 
+if [[ ! -f "${source_checkpoint}" ]]; then
+    echo "Cellpose source checkpoint does not exist: ${source_checkpoint}" >&2
+    exit 1
+fi
 if [[ -e "${task_root}" ]]; then
     echo "Refusing to overwrite existing transfer task: ${task_root}" >&2
     exit 1

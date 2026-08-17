@@ -9,7 +9,7 @@ import pandas as pd
 import tifffile
 
 from astroseg.io import load_manifest
-from astroseg.training import instance_segmentation_metrics, process_ownership_accuracy
+from astroseg.metrics import instance_segmentation_metrics, process_ownership_accuracy
 
 
 def _resolve_path(value: str, manifest_path: Path, description: str) -> Path:

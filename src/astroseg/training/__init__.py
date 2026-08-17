@@ -1,7 +1,7 @@
 """Losses, metrics, checkpoints, and training loops."""
 
 from astroseg.training.losses import CrossEntropyDiceLoss, DiceLoss, NucleusGuidedInstanceLoss
-from astroseg.training.instance_metrics import (
+from astroseg.metrics import (
     instance_segmentation_metrics,
     match_instances,
     process_ownership_accuracy,

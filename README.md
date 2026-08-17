@@ -14,6 +14,35 @@ ownership:        every predicted cell is linked to one nucleus
 
 ## Model overview
 
+The repository intentionally keeps two complete model paths:
+
+1. the independent AstroSeg nucleus-guided U-Net pipeline, retained for future
+   architecture research and training from random initialization;
+2. the current production path, which fine-tunes Cyto2, expands its input layer
+   to aligned GFAP/GFP/DAPI, and then fine-tunes all Cellpose weights.
+
+The second path is recommended for current predictions because it has the best
+held-out instance-separation evidence. Keeping the first path does not make it a
+production dependency; it remains a usable, tested research pipeline.
+
+| Workflow | Initialization | Training entrypoint | Guide |
+|---|---|---|---|
+| Independent AstroSeg | Random; no Cellpose weights | `scripts/slurm_sweep_astroseg_v2.sh` | [`workflows/independent_model/`](workflows/independent_model/) |
+| Cellpose refinement | Refined Cyto2 checkpoint | `scripts/slurm_train_cellpose_three_channel.sh` | [`workflows/cellpose_refinement/`](workflows/cellpose_refinement/) |
+
+Submit either workflow—or both as independent concurrent Slurm arrays—with:
+
+```bash
+bash scripts/submit_training_workflows.sh new-model
+bash scripts/submit_training_workflows.sh refine-cellpose
+export ASTROSEG_RUN_NAME="astroseg_v2_from_scratch_$(date +%Y%m%d_%H%M)"
+export CELLPOSE_TRANSFER_RUN_NAME="three_channel_transfer_$(date +%Y%m%d_%H%M)"
+bash scripts/submit_training_workflows.sh both
+```
+
+`both` submits the arrays independently; Slurm starts them concurrently when
+enough matching GPUs are available, otherwise one or more tasks remain queued.
+
 Every model input has three aligned fluorescence planes in one fixed biological
 order: normalized GFAP/Cy5, GFP/auxiliary fluorescence, and DAPI. Acquisitions
 without GFP receive an explicit all-zero middle plane; transmitted-light planes
@@ -192,8 +221,9 @@ seed masks -> initial training -> predictions on unlabeled images
 
 ### Cellpose fine-tuning
 
-Cellpose fine-tuning is a separate, simpler workflow for establishing a strong
-instance-segmentation baseline. It does not replace the nucleus-guided U-Net above.
+Cellpose fine-tuning is the current production workflow. The independent
+nucleus-guided U-Net remains available for future experiments, but it is not used
+to create the selected Cellpose-transfer checkpoint.
 Each training image must be beside its Cellpose GUI annotation and share its base
 name:
 
@@ -209,33 +239,44 @@ It creates symlinks for a run and never changes the original image or annotation
 Cellpose trains from the final `masks` array: the GUI's `ismanual` field records
 provenance but does not include, exclude, or weight a cell during training.
 
-Create the isolated Cellpose 3 environment once, then submit a single baseline:
+Create the isolated Cellpose 3 environment once:
 
 ```bash
 cd ~/astrocytes_morphology_detection
 export ASTROSEG_DATA_ROOT="$HOME/astroseg_data"
 mkdir -p cluster_logs
 sbatch scripts/slurm_setup_cellpose3.sh
-sbatch scripts/slurm_train_cellpose3.sh
 ```
 
-For comparable learning-rate experiments, the committed lists in
-`configs/cellpose_split_original_channels/` keep whole images in either training or validation. The
-two arrays cover `cyto2_cp3` and `cyto3`; each task uses one A100 GPU and writes its
-log, checkpoints, loss history, and run metadata inside its own result folder:
+The committed lists in `configs/cellpose_split_original_channels/` keep whole
+images in either training or validation. The retained reproducible sequence is:
 
 ```bash
-sbatch scripts/slurm_sweep_cellpose_lr.sh       # LR: 0.02, 0.05, 0.1, 0.2
-sbatch scripts/slurm_extend_cellpose_lr.sh      # LR: 0.25 through 0.5
+# 1. Reproduce the Cyto2/Cyto3 comparison and refined Cyto2 parent.
+sbatch scripts/slurm_sweep_cellpose_original_channels.sh
 
+# 2. Summarize its validation-loss histories.
 python scripts/summarize_cellpose_sweep.py \
-  --sweep-dir "$ASTROSEG_DATA_ROOT/outputs/cellpose/lr_sweeps/lr_sweep_replicate_split"
+  --sweep-dir "$ASTROSEG_DATA_ROOT/outputs/cellpose/lr_sweeps/lr_sweep_original_channels_20260810"
+
+# 3. Expand the selected Cyto2 checkpoint to GFAP/GFP/DAPI and fine-tune it.
+sbatch scripts/slurm_train_cellpose_three_channel.sh
+
+# 4. Shortlist snapshots, evaluate object separation, and rank by PQ then F1.
+python scripts/select_cellpose_checkpoint_candidates.py \
+  --run-root "$ASTROSEG_DATA_ROOT/outputs/cellpose/three_channel/three_channel_transfer_20260816" \
+  --output "$ASTROSEG_DATA_ROOT/outputs/cellpose/three_channel/three_channel_transfer_20260816/checkpoint_candidates.csv"
+sbatch scripts/slurm_evaluate_cellpose_candidates.sh
+python scripts/rank_cellpose_checkpoint_evaluations.py \
+  --evaluation-root "$ASTROSEG_DATA_ROOT/outputs/evaluations/three_channel_transfer_20260816" \
+  --output "$ASTROSEG_DATA_ROOT/outputs/evaluations/three_channel_transfer_20260816/ranking.csv"
+
+# 5. Predict the reserved test images with the selected checkpoint.
+sbatch scripts/slurm_predict_cellpose_three_channel.sh
 ```
 
-The ranked `summary.csv` reports the best saved checkpoint for each run. Validation
-loss is useful for comparing runs made with the same split, but it is not a final
-biological-quality score; inspect overlays and report held-out instance metrics
-before using a model for scientific conclusions.
+Validation loss only shortlists checkpoints. Final selection uses held-out
+instance F1 and panoptic quality, followed by overlay review in the GUI.
 
 ### Local mask comparison and correction GUI
 
@@ -252,6 +293,7 @@ Arrange local files by model, keeping the original image basename for every mask
     masks/cyto2/            <image_id>.tiff
     masks/cyto3/            <image_id>.tiff
     masks/three_channel/    <image_id>.tiff
+    masks/astroseg_v2/      <image_id>.tiff
     ground_truth/           <image_id>_seg.npy
     corrections/            created by the GUI
 ```
@@ -264,6 +306,7 @@ Then launch it from PowerShell:
   --masks "Cyto2=.astroseg_gui\comparison\masks\cyto2" `
   --masks "Cyto3=.astroseg_gui\comparison\masks\cyto3" `
   --masks "New 3-channel=.astroseg_gui\comparison\masks\three_channel" `
+  --masks "AstroSeg v2=.astroseg_gui\comparison\masks\astroseg_v2" `
   --ground-truth .astroseg_gui\comparison\ground_truth `
   --corrections .astroseg_gui\comparison\corrections
 ```
@@ -302,6 +345,8 @@ patch counts, and parameter count remain auditable.
 ```text
 configs/                 local and cluster-native pipeline settings
 src/astroseg/io/         BMP/TIFF/OME-TIFF and manifest loading
+src/astroseg/cellpose/   isolated Cyto2/Cellpose weight-transfer utilities
+src/astroseg/metrics/    object metrics shared by both model families
 src/astroseg/preprocessing/ channels, nuclei, patches, instance targets
 src/astroseg/datasets/   aligned semantic and instance datasets
 src/astroseg/models/     binary, nucleus-guided, and multichannel residual U-Nets
@@ -310,6 +355,7 @@ src/astroseg/inference/  patch and full-image prediction
 src/astroseg/postprocessing/ complete-cell reconstruction
 src/astroseg/analysis/   per-cell morphology measurements
 scripts/                 command-line and Slurm workflows
+workflows/               separate guides for new-model and refinement paths
 notebooks/               guided execution and learning
 tests/                   synthetic regression tests
 ```
